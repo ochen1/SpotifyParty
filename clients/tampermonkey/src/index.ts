@@ -1,6 +1,7 @@
 import {
   DEFAULT_TAMPERMONKEY_COMMAND_LEAD_MS,
   monotonicNowMs,
+  sleep,
   type PlayerState,
   type SpotifyPartyAdapter
 } from "../../../packages/core/src";
@@ -40,15 +41,78 @@ interface SpotifyWebpackWindow extends Window {
   webpackChunkclient_web?: Array<unknown>;
 }
 
+interface ReactFiber {
+  child?: ReactFiber | null;
+  sibling?: ReactFiber | null;
+  elementType?: {
+    _context?: unknown;
+  };
+  memoizedProps?: {
+    value?: unknown;
+  };
+  type?: {
+    _context?: unknown;
+  };
+}
+
+interface SpotifyRegistry {
+  resolve: (token: symbol) => unknown;
+}
+
+interface SpotifyInternalPlayerApi {
+  getReferrer?: () => string;
+  getState?: () => SpotifyInternalPlayerState | null;
+  pause?: (origin?: SpotifyCommandOrigin) => Promise<void> | void;
+  play?: (
+    context: { uri: string },
+    origin?: SpotifyCommandOrigin,
+    options?: { paused?: boolean; seekTo?: number }
+  ) => Promise<void> | void;
+  resume?: (origin?: SpotifyCommandOrigin) => Promise<void> | void;
+  seekTo?: (positionMs: number) => Promise<void> | void;
+}
+
+interface SpotifyInternalPlaybackApi {
+  getVolume?: () => Promise<number> | number;
+  setVolume?: (level: number) => Promise<void> | void;
+}
+
+interface SpotifyCommandOrigin {
+  featureIdentifier: string;
+  referrerIdentifier?: string;
+}
+
+interface SpotifyInternalPlayerState {
+  duration?: unknown;
+  hasContext?: unknown;
+  isBuffering?: unknown;
+  isPaused?: unknown;
+  item?: {
+    duration?: {
+      milliseconds?: unknown;
+    };
+    metadata?: Record<string, unknown>;
+    uri?: unknown;
+  };
+  position?: unknown;
+  positionAsOfTimestamp?: unknown;
+  speed?: unknown;
+  timestamp?: unknown;
+}
+
 const INTERNAL_TOKEN_WAIT_MS = 5_000;
 const INTERNAL_TOKEN_POLL_MS = 250;
 const SPOTIFY_RATE_LIMIT_BACKOFF_MS = 60_000;
+const SPOTIFY_PARTY_FEATURE = "spotify_party";
 
 let capturedToken: string | null = null;
 let tokenExpiresAtMs = 0;
 let legacyTokenRetryAfterMs = 0;
 let apiRetryAfterMs = 0;
 let spotifyRequire: SpotifyWebpackRequire | null = null;
+let spotifyRegistry: SpotifyRegistry | null = null;
+let spotifyPlayerApi: SpotifyInternalPlayerApi | null = null;
+let spotifyPlaybackApi: SpotifyInternalPlaybackApi | null = null;
 let capturedPlaybackState: CapturedPlaybackState | null = null;
 
 installTokenBridge();
@@ -89,6 +153,12 @@ function createWebAdapter(): SpotifyPartyAdapter {
   }
 
   async function getState(): Promise<PlayerState> {
+    const internalState = readInternalPlayerState();
+
+    if (internalState?.uri) {
+      return internalState;
+    }
+
     const capturedState = readCapturedPlaybackState();
 
     if (capturedState?.uri) {
@@ -128,6 +198,10 @@ function createWebAdapter(): SpotifyPartyAdapter {
     kind: "tampermonkey",
     getState,
     async playUri(uri, positionMs) {
+      if (await playUriWithInternalPlayer(uri, positionMs)) {
+        return;
+      }
+
       await spotifyFetch("https://api.spotify.com/v1/me/player/play", {
         method: "PUT",
         body: JSON.stringify({
@@ -137,17 +211,33 @@ function createWebAdapter(): SpotifyPartyAdapter {
       });
     },
     async seek(positionMs) {
+      if (await seekWithInternalPlayer(positionMs)) {
+        return;
+      }
+
       const url = new URL("https://api.spotify.com/v1/me/player/seek");
       url.searchParams.set("position_ms", String(Math.max(0, Math.round(positionMs))));
       await spotifyFetch(url.toString(), { method: "PUT" });
     },
     async play() {
+      if (await resumeWithInternalPlayer()) {
+        return;
+      }
+
       await spotifyFetch("https://api.spotify.com/v1/me/player/play", { method: "PUT" });
     },
     async pause() {
+      if (await pauseWithInternalPlayer()) {
+        return;
+      }
+
       await spotifyFetch("https://api.spotify.com/v1/me/player/pause", { method: "PUT" });
     },
     async setVolume(level) {
+      if (await setVolumeWithInternalPlayer(level)) {
+        return;
+      }
+
       const url = new URL("https://api.spotify.com/v1/me/player/volume");
       url.searchParams.set("volume_percent", String(Math.round(Math.max(0, Math.min(1, level)) * 100)));
       await spotifyFetch(url.toString(), { method: "PUT" });
@@ -349,6 +439,309 @@ function isTokenStoreClass(value: unknown): value is {
   getInstance: () => { accessToken?: string; _accessToken?: string };
 } {
   return typeof value === "function" && typeof (value as { getInstance?: unknown }).getInstance === "function";
+}
+
+function readInternalPlayerState(): PlayerState | null {
+  try {
+    const player = getSpotifyPlayerApi();
+    const state = player?.getState?.();
+
+    if (!state) {
+      return null;
+    }
+
+    return normalizeInternalPlayerState(state);
+  } catch {
+    spotifyPlayerApi = null;
+    return null;
+  }
+}
+
+function normalizeInternalPlayerState(state: SpotifyInternalPlayerState): PlayerState | null {
+  const uri = typeof state.item?.uri === "string" ? state.item.uri : null;
+
+  if (!uri?.startsWith("spotify:track:")) {
+    return null;
+  }
+
+  const durationMs =
+    finiteNumber(state.duration) ||
+    finiteNumber(state.item?.duration?.milliseconds) ||
+    finiteNumber(state.item?.metadata?.duration);
+  const progressMs = readInternalProgressMs(state, durationMs);
+
+  return {
+    uri,
+    progressMs,
+    durationMs,
+    isPlaying: state.hasContext !== false && state.isPaused !== true,
+    volume: readFallbackState().volume,
+    observedAtMs: monotonicNowMs()
+  };
+}
+
+function readInternalProgressMs(state: SpotifyInternalPlayerState, durationMs: number): number {
+  const metadataPosition = finiteNumber(state.item?.metadata?.["segment.position_as_of_timestamp"]);
+  const positionMs = finiteNumber(state.positionAsOfTimestamp) || finiteNumber(state.position) || metadataPosition;
+
+  if (state.hasContext === false || state.isPaused === true || state.isBuffering === true) {
+    return clampProgress(positionMs, durationMs);
+  }
+
+  const timestampMs = finiteNumber(state.timestamp);
+  const speed = state.speed === undefined || state.speed === null ? 1 : finiteNumber(state.speed);
+  const elapsedMs = timestampMs > 0 && speed > 0 ? (Date.now() - timestampMs) * speed : 0;
+  return clampProgress(positionMs + elapsedMs, durationMs);
+}
+
+function clampProgress(positionMs: number, durationMs: number): number {
+  const safePositionMs = Math.max(0, positionMs);
+  return durationMs > 0 ? Math.min(durationMs, safePositionMs) : safePositionMs;
+}
+
+function getSpotifyPlayerApi(): SpotifyInternalPlayerApi | null {
+  if (isSpotifyPlayerApi(spotifyPlayerApi)) {
+    return spotifyPlayerApi;
+  }
+
+  spotifyPlayerApi = getSpotifyService<SpotifyInternalPlayerApi>("PlayerAPI", isSpotifyPlayerApi);
+  return spotifyPlayerApi;
+}
+
+function getSpotifyPlaybackApi(): SpotifyInternalPlaybackApi | null {
+  if (isSpotifyPlaybackApi(spotifyPlaybackApi)) {
+    return spotifyPlaybackApi;
+  }
+
+  spotifyPlaybackApi = getSpotifyService<SpotifyInternalPlaybackApi>("PlaybackAPI", isSpotifyPlaybackApi);
+  return spotifyPlaybackApi;
+}
+
+function getSpotifyService<T>(name: string, isService: (value: unknown) => value is T): T | null {
+  const registry = getSpotifyRegistry();
+
+  if (!registry) {
+    return null;
+  }
+
+  try {
+    const service = registry.resolve(Symbol.for(name));
+    return isService(service) ? service : null;
+  } catch {
+    return null;
+  }
+}
+
+function getSpotifyRegistry(): SpotifyRegistry | null {
+  if (isSpotifyRegistry(spotifyRegistry) && getSpotifyServiceNoCache(spotifyRegistry, "PlayerAPI", isSpotifyPlayerApi)) {
+    return spotifyRegistry;
+  }
+
+  spotifyRegistry = findSpotifyRegistryFromReact();
+  return spotifyRegistry;
+}
+
+function getSpotifyServiceNoCache<T>(
+  registry: SpotifyRegistry,
+  name: string,
+  isService: (value: unknown) => value is T
+): T | null {
+  try {
+    const service = registry.resolve(Symbol.for(name));
+    return isService(service) ? service : null;
+  } catch {
+    return null;
+  }
+}
+
+function findSpotifyRegistryFromReact(): SpotifyRegistry | null {
+  const stack = collectReactFibers();
+  const seen = new Set<ReactFiber>();
+  let visited = 0;
+
+  while (stack.length > 0 && visited < 120_000) {
+    const fiber = stack.pop();
+
+    if (!fiber || seen.has(fiber)) {
+      continue;
+    }
+
+    seen.add(fiber);
+    visited += 1;
+
+    const value = fiber.memoizedProps?.value;
+
+    if (isSpotifyRegistry(value) && getSpotifyServiceNoCache(value, "PlayerAPI", isSpotifyPlayerApi)) {
+      return value;
+    }
+
+    if (fiber.child) {
+      stack.push(fiber.child);
+    }
+
+    if (fiber.sibling) {
+      stack.push(fiber.sibling);
+    }
+  }
+
+  return null;
+}
+
+function collectReactFibers(): ReactFiber[] {
+  const roots: ReactFiber[] = [];
+  const candidates = new Set<Element>();
+
+  for (const element of [document.getElementById("main"), document.body, document.documentElement]) {
+    if (element) {
+      candidates.add(element);
+    }
+  }
+
+  for (const element of document.querySelectorAll("[data-testid], main, div")) {
+    candidates.add(element);
+
+    if (candidates.size > 250) {
+      break;
+    }
+  }
+
+  for (const element of candidates) {
+    for (const key of Object.getOwnPropertyNames(element)) {
+      if (key.startsWith("__reactContainer$") || key.startsWith("__reactFiber$")) {
+        const fiber = (element as unknown as Record<string, unknown>)[key];
+
+        if (isReactFiber(fiber)) {
+          roots.push(fiber);
+        }
+      }
+    }
+  }
+
+  return roots;
+}
+
+function isReactFiber(value: unknown): value is ReactFiber {
+  return !!value && typeof value === "object";
+}
+
+function isSpotifyRegistry(value: unknown): value is SpotifyRegistry {
+  return !!value && typeof value === "object" && typeof (value as SpotifyRegistry).resolve === "function";
+}
+
+function isSpotifyPlayerApi(value: unknown): value is SpotifyInternalPlayerApi {
+  return !!value && typeof value === "object" && typeof (value as SpotifyInternalPlayerApi).getState === "function";
+}
+
+function isSpotifyPlaybackApi(value: unknown): value is SpotifyInternalPlaybackApi {
+  return (
+    !!value &&
+    typeof value === "object" &&
+    (typeof (value as SpotifyInternalPlaybackApi).setVolume === "function" ||
+      typeof (value as SpotifyInternalPlaybackApi).getVolume === "function")
+  );
+}
+
+async function playUriWithInternalPlayer(uri: string, positionMs: number): Promise<boolean> {
+  const player = getSpotifyPlayerApi();
+
+  if (typeof player?.play !== "function") {
+    return false;
+  }
+
+  try {
+    await Promise.resolve(
+      player.play(
+        { uri },
+        createInternalCommandOrigin(player),
+        { paused: false, seekTo: Math.max(0, Math.round(positionMs)) }
+      )
+    );
+    await sleep(80);
+
+    if (typeof player.seekTo === "function") {
+      await Promise.resolve(player.seekTo(Math.max(0, Math.round(positionMs))));
+    }
+
+    if (typeof player.resume === "function") {
+      await Promise.resolve(player.resume(createInternalCommandOrigin(player)));
+    }
+
+    return true;
+  } catch {
+    spotifyPlayerApi = null;
+    return false;
+  }
+}
+
+async function seekWithInternalPlayer(positionMs: number): Promise<boolean> {
+  const player = getSpotifyPlayerApi();
+
+  if (typeof player?.seekTo !== "function") {
+    return false;
+  }
+
+  try {
+    await Promise.resolve(player.seekTo(Math.max(0, Math.round(positionMs))));
+    return true;
+  } catch {
+    spotifyPlayerApi = null;
+    return false;
+  }
+}
+
+async function resumeWithInternalPlayer(): Promise<boolean> {
+  const player = getSpotifyPlayerApi();
+
+  if (typeof player?.resume !== "function") {
+    return false;
+  }
+
+  try {
+    await Promise.resolve(player.resume(createInternalCommandOrigin(player)));
+    return true;
+  } catch {
+    spotifyPlayerApi = null;
+    return false;
+  }
+}
+
+async function pauseWithInternalPlayer(): Promise<boolean> {
+  const player = getSpotifyPlayerApi();
+
+  if (typeof player?.pause !== "function") {
+    return false;
+  }
+
+  try {
+    await Promise.resolve(player.pause(createInternalCommandOrigin(player)));
+    return true;
+  } catch {
+    spotifyPlayerApi = null;
+    return false;
+  }
+}
+
+async function setVolumeWithInternalPlayer(level: number): Promise<boolean> {
+  const playback = getSpotifyPlaybackApi();
+
+  if (typeof playback?.setVolume !== "function") {
+    return false;
+  }
+
+  try {
+    await Promise.resolve(playback.setVolume(Math.max(0, Math.min(1, level))));
+    return true;
+  } catch {
+    spotifyPlaybackApi = null;
+    return false;
+  }
+}
+
+function createInternalCommandOrigin(player: SpotifyInternalPlayerApi): SpotifyCommandOrigin {
+  return {
+    featureIdentifier: SPOTIFY_PARTY_FEATURE,
+    referrerIdentifier: player.getReferrer?.() ?? SPOTIFY_PARTY_FEATURE
+  };
 }
 
 function readCapturedPlaybackState(): PlayerState | null {
@@ -663,7 +1056,16 @@ function normalizeCapturedPlaybackState(value: unknown): CapturedPlaybackState |
 }
 
 function finiteNumber(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : 0;
+  }
+
+  if (typeof value === "string" && value.trim()) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : 0;
+  }
+
+  return 0;
 }
 
 async function waitForDocument(): Promise<void> {
