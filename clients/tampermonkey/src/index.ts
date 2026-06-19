@@ -11,18 +11,6 @@ import { createLocalSettingsStore } from "../../shared/src/settings";
 
 declare const unsafeWindow: Window | undefined;
 
-interface SpotifyPlayerResponse {
-  item?: {
-    uri?: string;
-    duration_ms?: number;
-  };
-  progress_ms?: number;
-  is_playing?: boolean;
-  device?: {
-    volume_percent?: number;
-  };
-}
-
 interface CapturedPlaybackState {
   uri: string | null;
   progressMs: number;
@@ -171,27 +159,7 @@ function createWebAdapter(): SpotifyPartyAdapter {
       return localState;
     }
 
-    if (Date.now() < apiRetryAfterMs) {
-      return localState;
-    }
-
-    const response = await spotifyFetch<SpotifyPlayerResponse>("https://api.spotify.com/v1/me/player").catch(
-      () => null
-    );
-
-    if (!response) {
-      return localState;
-    }
-
-    return {
-      uri: response.item?.uri ?? null,
-      progressMs: response.progress_ms ?? 0,
-      durationMs: response.item?.duration_ms ?? 0,
-      isPlaying: response.is_playing ?? false,
-      volume:
-        typeof response.device?.volume_percent === "number" ? response.device.volume_percent / 100 : null,
-      observedAtMs: monotonicNowMs()
-    };
+    return localState;
   }
 
   return {
@@ -264,6 +232,10 @@ function createWebAdapter(): SpotifyPartyAdapter {
 }
 
 async function spotifyFetch<T = unknown>(url: string, init: RequestInit = {}): Promise<T> {
+  if (Date.now() < apiRetryAfterMs) {
+    throw new Error("Spotify is rate limiting this browser. Wait a minute, refresh Spotify, start any track once, then reconnect.");
+  }
+
   const token = await getSpotifyToken();
   const response = await fetch(url, {
     ...init,

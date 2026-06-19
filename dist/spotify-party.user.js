@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SpotifyParty
 // @namespace    https://github.com/local/spotify-party
-// @version      0.1.7
+// @version      0.1.8
 // @description  Sync Spotify web playback with SpotifyParty rooms.
 // @match        https://open.spotify.com/*
 // @homepageURL  https://github.com/ochen1/SpotifyParty
@@ -981,23 +981,7 @@
       if (localState.uri) {
         return localState;
       }
-      if (Date.now() < apiRetryAfterMs) {
-        return localState;
-      }
-      const response = await spotifyFetch("https://api.spotify.com/v1/me/player").catch(
-        () => null
-      );
-      if (!response) {
-        return localState;
-      }
-      return {
-        uri: response.item?.uri ?? null,
-        progressMs: response.progress_ms ?? 0,
-        durationMs: response.item?.duration_ms ?? 0,
-        isPlaying: response.is_playing ?? false,
-        volume: typeof response.device?.volume_percent === "number" ? response.device.volume_percent / 100 : null,
-        observedAtMs: monotonicNowMs()
-      };
+      return localState;
     }
     return {
       kind: "tampermonkey",
@@ -1059,6 +1043,9 @@
     };
   }
   async function spotifyFetch(url, init = {}) {
+    if (Date.now() < apiRetryAfterMs) {
+      throw new Error("Spotify is rate limiting this browser. Wait a minute, refresh Spotify, start any track once, then reconnect.");
+    }
     const token = await getSpotifyToken();
     const response = await fetch(url, {
       ...init,
