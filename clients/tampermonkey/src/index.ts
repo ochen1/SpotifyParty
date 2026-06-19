@@ -22,8 +22,20 @@ interface SpotifyPlayerResponse {
   };
 }
 
+type SpotifyWebpackRequire = {
+  (id: number | string): Record<string, unknown>;
+  m?: Record<string, unknown>;
+};
+
+interface SpotifyWebpackWindow extends Window {
+  webpackChunkclient_web?: Array<unknown>;
+}
+
 let capturedToken: string | null = null;
 let tokenExpiresAtMs = 0;
+let legacyTokenRetryAfterMs = 0;
+let apiRetryAfterMs = 0;
+let spotifyRequire: SpotifyWebpackRequire | null = null;
 
 installTokenBridge();
 void boot();
@@ -63,7 +75,17 @@ function createWebAdapter(): SpotifyPartyAdapter {
   }
 
   async function getState(): Promise<PlayerState> {
-    const response = await spotifyFetch<SpotifyPlayerResponse>("https://api.spotify.com/v1/me/player");
+    if (Date.now() < apiRetryAfterMs) {
+      return readFallbackState();
+    }
+
+    const response = await spotifyFetch<SpotifyPlayerResponse>("https://api.spotify.com/v1/me/player").catch(
+      () => null
+    );
+
+    if (!response) {
+      return readFallbackState();
+    }
 
     return {
       uri: response.item?.uri ?? null,
@@ -108,7 +130,7 @@ function createWebAdapter(): SpotifyPartyAdapter {
       listeners.add(listener);
 
       if (timer === null) {
-        timer = window.setInterval(() => void emitState(), 1000);
+        timer = window.setInterval(() => void emitState(), 5000);
       }
 
       void emitState();
@@ -141,6 +163,14 @@ async function spotifyFetch<T = unknown>(url: string, init: RequestInit = {}): P
   }
 
   if (!response.ok) {
+    if (response.status === 429) {
+      const retryAfterSeconds = Number(response.headers.get("retry-after"));
+
+      if (Number.isFinite(retryAfterSeconds)) {
+        apiRetryAfterMs = Math.max(apiRetryAfterMs, Date.now() + retryAfterSeconds * 1000);
+      }
+    }
+
     const body = await response.text().catch(() => "");
     throw new Error(`Spotify API failed: HTTP ${response.status} ${body}`.trim());
   }
@@ -149,8 +179,20 @@ async function spotifyFetch<T = unknown>(url: string, init: RequestInit = {}): P
 }
 
 async function getSpotifyToken(): Promise<string> {
+  const internalToken = readInternalSpotifyToken();
+
+  if (internalToken) {
+    capturedToken = internalToken;
+    tokenExpiresAtMs = Date.now() + 5 * 60_000;
+    return internalToken;
+  }
+
   if (capturedToken && Date.now() < tokenExpiresAtMs - 60_000) {
     return capturedToken;
+  }
+
+  if (Date.now() < legacyTokenRetryAfterMs) {
+    throw new Error("Spotify web token unavailable; waiting before retrying the legacy token endpoint.");
   }
 
   const response = await fetch(
@@ -161,6 +203,10 @@ async function getSpotifyToken(): Promise<string> {
   );
 
   if (!response.ok) {
+    if (response.status === 403 || response.status === 429) {
+      legacyTokenRetryAfterMs = Date.now() + 60_000;
+    }
+
     throw new Error("Could not read Spotify web token. Refresh Spotify and start playback once.");
   }
 
@@ -176,6 +222,118 @@ async function getSpotifyToken(): Promise<string> {
   capturedToken = body.accessToken;
   tokenExpiresAtMs = body.accessTokenExpirationTimestampMs ?? Date.now() + 30 * 60_000;
   return capturedToken;
+}
+
+function readInternalSpotifyToken(): string | null {
+  try {
+    const require = getSpotifyRequire();
+
+    if (!require?.m) {
+      return null;
+    }
+
+    for (const [id, factory] of Object.entries(require.m)) {
+      if (typeof factory !== "function") {
+        continue;
+      }
+
+      const source = Function.prototype.toString.call(factory);
+
+      if (
+        !source.includes("accessToken") ||
+        !source.includes("setSession") ||
+        !source.includes("getInstance") ||
+        !source.includes("resetInstance")
+      ) {
+        continue;
+      }
+
+      const moduleExports = require(Number(id));
+
+      for (const value of Object.values(moduleExports)) {
+        if (!isTokenStoreClass(value)) {
+          continue;
+        }
+
+        const instance = value.getInstance();
+        const token = instance.accessToken || instance._accessToken;
+
+        if (typeof token === "string" && token.length > 80) {
+          return token;
+        }
+      }
+    }
+  } catch {
+    return null;
+  }
+
+  return null;
+}
+
+function getSpotifyRequire(): SpotifyWebpackRequire | null {
+  if (spotifyRequire) {
+    return spotifyRequire;
+  }
+
+  const page = (typeof unsafeWindow === "undefined" ? window : unsafeWindow) as SpotifyWebpackWindow;
+  const chunk = page.webpackChunkclient_web;
+
+  if (!Array.isArray(chunk)) {
+    return null;
+  }
+
+  const chunkId = `spotify_party_runtime_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+  chunk.push([[chunkId], {}, (runtimeRequire: SpotifyWebpackRequire) => {
+    spotifyRequire = runtimeRequire;
+  }]);
+
+  return spotifyRequire;
+}
+
+function isTokenStoreClass(value: unknown): value is {
+  getInstance: () => { accessToken?: string; _accessToken?: string };
+} {
+  return typeof value === "function" && typeof (value as { getInstance?: unknown }).getInstance === "function";
+}
+
+function readFallbackState(): PlayerState {
+  const progressSlider = document.querySelector("[aria-label='Change progress']");
+  const volumeSlider = document.querySelector("[aria-label='Change volume']");
+  const url = new URL(location.href);
+  const uriParam = url.searchParams.get("uri");
+  const trackLink = document.querySelector<HTMLAnchorElement>("a[href*='/track/']");
+  const trackIdFromLink = trackLink?.href.match(/\/track\/([A-Za-z0-9]+)/)?.[1] ?? null;
+  const uri =
+    uriParam?.startsWith("spotify:track:")
+      ? uriParam
+      : trackIdFromLink
+        ? `spotify:track:${trackIdFromLink}`
+        : null;
+
+  return {
+    uri,
+    progressMs: readSliderNumber(progressSlider, "value"),
+    durationMs: readSliderNumber(progressSlider, "max"),
+    isPlaying: !!document.querySelector("button[aria-label='Pause']"),
+    volume: readSliderNumber(volumeSlider, "value"),
+    observedAtMs: monotonicNowMs()
+  };
+}
+
+function readSliderNumber(element: Element | null, key: "value" | "max"): number {
+  if (!element) {
+    return 0;
+  }
+
+  const htmlValue =
+    element instanceof HTMLInputElement
+      ? key === "value"
+        ? element.value
+        : element.max
+      : element.getAttribute(key) ?? element.getAttribute(`aria-value${key === "max" ? "max" : "now"}`);
+  const value = Number(htmlValue);
+
+  return Number.isFinite(value) ? value : 0;
 }
 
 function installTokenBridge(): void {

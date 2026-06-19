@@ -599,7 +599,7 @@
       this.setStatus("Disconnected");
     }
     async scheduleCurrentTrack() {
-      const state = await this.adapter.getState();
+      const state = await this.safeGetState();
       if (!state.uri) {
         this.setStatus("No Spotify track is playing");
         return;
@@ -748,7 +748,7 @@
     startTimers() {
       this.stopTimers();
       this.pingTimer = window.setInterval(() => this.ping(), 750);
-      this.stateTimer = window.setInterval(() => void this.reportState(), 2e3);
+      this.stateTimer = window.setInterval(() => void this.reportState(), 5e3);
       this.ping();
       void this.reportState();
     }
@@ -779,7 +779,7 @@
       if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
         return;
       }
-      const state = await this.adapter.getState();
+      const state = await this.safeGetState();
       const stats = this.clock.getStats();
       this.player = state;
       this.send({
@@ -789,6 +789,21 @@
         uncertaintyMs: Number.isFinite(stats.uncertaintyMs) ? stats.uncertaintyMs : null
       });
       this.emit();
+    }
+    async safeGetState() {
+      try {
+        return await this.adapter.getState();
+      } catch (error) {
+        this.setStatus(error instanceof Error ? error.message : "Could not read Spotify state");
+        return {
+          uri: null,
+          progressMs: 0,
+          durationMs: 0,
+          isPlaying: false,
+          volume: null,
+          observedAtMs: monotonicNowMs()
+        };
+      }
     }
     send(message) {
       if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
@@ -839,6 +854,9 @@
   // clients/tampermonkey/src/index.ts
   var capturedToken = null;
   var tokenExpiresAtMs = 0;
+  var legacyTokenRetryAfterMs = 0;
+  var apiRetryAfterMs = 0;
+  var spotifyRequire = null;
   installTokenBridge();
   void boot();
   async function boot() {
@@ -870,7 +888,15 @@
       }
     }
     async function getState() {
-      const response = await spotifyFetch("https://api.spotify.com/v1/me/player");
+      if (Date.now() < apiRetryAfterMs) {
+        return readFallbackState();
+      }
+      const response = await spotifyFetch("https://api.spotify.com/v1/me/player").catch(
+        () => null
+      );
+      if (!response) {
+        return readFallbackState();
+      }
       return {
         uri: response.item?.uri ?? null,
         progressMs: response.progress_ms ?? 0,
@@ -911,7 +937,7 @@
       onStateChange(listener) {
         listeners.add(listener);
         if (timer === null) {
-          timer = window.setInterval(() => void emitState(), 1e3);
+          timer = window.setInterval(() => void emitState(), 5e3);
         }
         void emitState();
         return () => {
@@ -938,14 +964,29 @@
       return void 0;
     }
     if (!response.ok) {
+      if (response.status === 429) {
+        const retryAfterSeconds = Number(response.headers.get("retry-after"));
+        if (Number.isFinite(retryAfterSeconds)) {
+          apiRetryAfterMs = Math.max(apiRetryAfterMs, Date.now() + retryAfterSeconds * 1e3);
+        }
+      }
       const body = await response.text().catch(() => "");
       throw new Error(`Spotify API failed: HTTP ${response.status} ${body}`.trim());
     }
     return await response.json();
   }
   async function getSpotifyToken() {
+    const internalToken = readInternalSpotifyToken();
+    if (internalToken) {
+      capturedToken = internalToken;
+      tokenExpiresAtMs = Date.now() + 5 * 6e4;
+      return internalToken;
+    }
     if (capturedToken && Date.now() < tokenExpiresAtMs - 6e4) {
       return capturedToken;
+    }
+    if (Date.now() < legacyTokenRetryAfterMs) {
+      throw new Error("Spotify web token unavailable; waiting before retrying the legacy token endpoint.");
     }
     const response = await fetch(
       "https://open.spotify.com/get_access_token?reason=transport&productType=web_player",
@@ -954,6 +995,9 @@
       }
     );
     if (!response.ok) {
+      if (response.status === 403 || response.status === 429) {
+        legacyTokenRetryAfterMs = Date.now() + 6e4;
+      }
       throw new Error("Could not read Spotify web token. Refresh Spotify and start playback once.");
     }
     const body = await response.json();
@@ -963,6 +1007,80 @@
     capturedToken = body.accessToken;
     tokenExpiresAtMs = body.accessTokenExpirationTimestampMs ?? Date.now() + 30 * 6e4;
     return capturedToken;
+  }
+  function readInternalSpotifyToken() {
+    try {
+      const require2 = getSpotifyRequire();
+      if (!require2?.m) {
+        return null;
+      }
+      for (const [id, factory] of Object.entries(require2.m)) {
+        if (typeof factory !== "function") {
+          continue;
+        }
+        const source = Function.prototype.toString.call(factory);
+        if (!source.includes("accessToken") || !source.includes("setSession") || !source.includes("getInstance") || !source.includes("resetInstance")) {
+          continue;
+        }
+        const moduleExports = require2(Number(id));
+        for (const value of Object.values(moduleExports)) {
+          if (!isTokenStoreClass(value)) {
+            continue;
+          }
+          const instance = value.getInstance();
+          const token = instance.accessToken || instance._accessToken;
+          if (typeof token === "string" && token.length > 80) {
+            return token;
+          }
+        }
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  function getSpotifyRequire() {
+    if (spotifyRequire) {
+      return spotifyRequire;
+    }
+    const page = typeof unsafeWindow === "undefined" ? window : unsafeWindow;
+    const chunk = page.webpackChunkclient_web;
+    if (!Array.isArray(chunk)) {
+      return null;
+    }
+    const chunkId = `spotify_party_runtime_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    chunk.push([[chunkId], {}, (runtimeRequire) => {
+      spotifyRequire = runtimeRequire;
+    }]);
+    return spotifyRequire;
+  }
+  function isTokenStoreClass(value) {
+    return typeof value === "function" && typeof value.getInstance === "function";
+  }
+  function readFallbackState() {
+    const progressSlider = document.querySelector("[aria-label='Change progress']");
+    const volumeSlider = document.querySelector("[aria-label='Change volume']");
+    const url = new URL(location.href);
+    const uriParam = url.searchParams.get("uri");
+    const trackLink = document.querySelector("a[href*='/track/']");
+    const trackIdFromLink = trackLink?.href.match(/\/track\/([A-Za-z0-9]+)/)?.[1] ?? null;
+    const uri = uriParam?.startsWith("spotify:track:") ? uriParam : trackIdFromLink ? `spotify:track:${trackIdFromLink}` : null;
+    return {
+      uri,
+      progressMs: readSliderNumber(progressSlider, "value"),
+      durationMs: readSliderNumber(progressSlider, "max"),
+      isPlaying: !!document.querySelector("button[aria-label='Pause']"),
+      volume: readSliderNumber(volumeSlider, "value"),
+      observedAtMs: monotonicNowMs()
+    };
+  }
+  function readSliderNumber(element, key) {
+    if (!element) {
+      return 0;
+    }
+    const htmlValue = element instanceof HTMLInputElement ? key === "value" ? element.value : element.max : element.getAttribute(key) ?? element.getAttribute(`aria-value${key === "max" ? "max" : "now"}`);
+    const value = Number(htmlValue);
+    return Number.isFinite(value) ? value : 0;
   }
   function installTokenBridge() {
     window.addEventListener("spotify-party-token", (event) => {

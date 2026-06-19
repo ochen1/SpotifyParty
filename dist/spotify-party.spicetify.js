@@ -587,7 +587,7 @@
       this.setStatus("Disconnected");
     }
     async scheduleCurrentTrack() {
-      const state = await this.adapter.getState();
+      const state = await this.safeGetState();
       if (!state.uri) {
         this.setStatus("No Spotify track is playing");
         return;
@@ -736,7 +736,7 @@
     startTimers() {
       this.stopTimers();
       this.pingTimer = window.setInterval(() => this.ping(), 750);
-      this.stateTimer = window.setInterval(() => void this.reportState(), 2e3);
+      this.stateTimer = window.setInterval(() => void this.reportState(), 5e3);
       this.ping();
       void this.reportState();
     }
@@ -767,7 +767,7 @@
       if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
         return;
       }
-      const state = await this.adapter.getState();
+      const state = await this.safeGetState();
       const stats = this.clock.getStats();
       this.player = state;
       this.send({
@@ -777,6 +777,21 @@
         uncertaintyMs: Number.isFinite(stats.uncertaintyMs) ? stats.uncertaintyMs : null
       });
       this.emit();
+    }
+    async safeGetState() {
+      try {
+        return await this.adapter.getState();
+      } catch (error) {
+        this.setStatus(error instanceof Error ? error.message : "Could not read Spotify state");
+        return {
+          uri: null,
+          progressMs: 0,
+          durationMs: 0,
+          isPlaying: false,
+          volume: null,
+          observedAtMs: monotonicNowMs()
+        };
+      }
     }
     send(message) {
       if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {

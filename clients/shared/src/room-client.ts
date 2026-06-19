@@ -150,7 +150,7 @@ export class SpotifyPartyRuntime {
   }
 
   async scheduleCurrentTrack(): Promise<void> {
-    const state = await this.adapter.getState();
+    const state = await this.safeGetState();
 
     if (!state.uri) {
       this.setStatus("No Spotify track is playing");
@@ -318,7 +318,7 @@ export class SpotifyPartyRuntime {
   private startTimers(): void {
     this.stopTimers();
     this.pingTimer = window.setInterval(() => this.ping(), 750);
-    this.stateTimer = window.setInterval(() => void this.reportState(), 2000);
+    this.stateTimer = window.setInterval(() => void this.reportState(), 5000);
     this.ping();
     void this.reportState();
   }
@@ -355,7 +355,7 @@ export class SpotifyPartyRuntime {
       return;
     }
 
-    const state = await this.adapter.getState();
+    const state = await this.safeGetState();
     const stats = this.clock.getStats();
     this.player = state;
     this.send({
@@ -365,6 +365,22 @@ export class SpotifyPartyRuntime {
       uncertaintyMs: Number.isFinite(stats.uncertaintyMs) ? stats.uncertaintyMs : null
     });
     this.emit();
+  }
+
+  private async safeGetState(): Promise<PlayerState> {
+    try {
+      return await this.adapter.getState();
+    } catch (error) {
+      this.setStatus(error instanceof Error ? error.message : "Could not read Spotify state");
+      return {
+        uri: null,
+        progressMs: 0,
+        durationMs: 0,
+        isPlaying: false,
+        volume: null,
+        observedAtMs: monotonicNowMs()
+      };
+    }
   }
 
   private send(message: ClientMessage): void {
