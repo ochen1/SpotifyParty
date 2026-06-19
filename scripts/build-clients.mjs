@@ -32,7 +32,7 @@ await build({
   banner: {
     js: `// ==UserScript==
 // @name         SpotifyParty
-// @namespace    https://github.com/ochen1/SpotifyParty
+// @namespace    https://github.com/local/spotify-party
 // @version      ${packageJson.version}
 // @description  Sync Spotify web playback with SpotifyParty rooms.
 // @match        https://open.spotify.com/*

@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SpotifyParty
-// @namespace    https://github.com/ochen1/SpotifyParty
-// @version      0.1.1
+// @namespace    https://github.com/local/spotify-party
+// @version      0.1.2
 // @description  Sync Spotify web playback with SpotifyParty rooms.
 // @match        https://open.spotify.com/*
 // @homepageURL  https://github.com/ochen1/SpotifyParty
