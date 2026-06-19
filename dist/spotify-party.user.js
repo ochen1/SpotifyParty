@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SpotifyParty
 // @namespace    https://github.com/local/spotify-party
-// @version      0.1.2
+// @version      0.1.3
 // @description  Sync Spotify web playback with SpotifyParty rooms.
 // @match        https://open.spotify.com/*
 // @homepageURL  https://github.com/ochen1/SpotifyParty
@@ -855,6 +855,8 @@
   }
 
   // clients/tampermonkey/src/index.ts
+  var INTERNAL_TOKEN_WAIT_MS = 5e3;
+  var INTERNAL_TOKEN_POLL_MS = 250;
   var capturedToken = null;
   var tokenExpiresAtMs = 0;
   var legacyTokenRetryAfterMs = 0;
@@ -988,6 +990,12 @@
     if (capturedToken && Date.now() < tokenExpiresAtMs - 6e4) {
       return capturedToken;
     }
+    const delayedInternalToken = await waitForInternalSpotifyToken();
+    if (delayedInternalToken) {
+      capturedToken = delayedInternalToken;
+      tokenExpiresAtMs = Date.now() + 5 * 6e4;
+      return delayedInternalToken;
+    }
     if (Date.now() < legacyTokenRetryAfterMs) {
       throw new Error("Spotify web token unavailable; waiting before retrying the legacy token endpoint.");
     }
@@ -1010,6 +1018,17 @@
     capturedToken = body.accessToken;
     tokenExpiresAtMs = body.accessTokenExpirationTimestampMs ?? Date.now() + 30 * 6e4;
     return capturedToken;
+  }
+  async function waitForInternalSpotifyToken() {
+    const expiresAt = Date.now() + INTERNAL_TOKEN_WAIT_MS;
+    while (Date.now() < expiresAt) {
+      await new Promise((resolve) => window.setTimeout(resolve, INTERNAL_TOKEN_POLL_MS));
+      const token = readInternalSpotifyToken();
+      if (token) {
+        return token;
+      }
+    }
+    return null;
   }
   function readInternalSpotifyToken() {
     try {

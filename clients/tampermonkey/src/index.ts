@@ -31,6 +31,9 @@ interface SpotifyWebpackWindow extends Window {
   webpackChunkclient_web?: Array<unknown>;
 }
 
+const INTERNAL_TOKEN_WAIT_MS = 5_000;
+const INTERNAL_TOKEN_POLL_MS = 250;
+
 let capturedToken: string | null = null;
 let tokenExpiresAtMs = 0;
 let legacyTokenRetryAfterMs = 0;
@@ -191,6 +194,14 @@ async function getSpotifyToken(): Promise<string> {
     return capturedToken;
   }
 
+  const delayedInternalToken = await waitForInternalSpotifyToken();
+
+  if (delayedInternalToken) {
+    capturedToken = delayedInternalToken;
+    tokenExpiresAtMs = Date.now() + 5 * 60_000;
+    return delayedInternalToken;
+  }
+
   if (Date.now() < legacyTokenRetryAfterMs) {
     throw new Error("Spotify web token unavailable; waiting before retrying the legacy token endpoint.");
   }
@@ -222,6 +233,22 @@ async function getSpotifyToken(): Promise<string> {
   capturedToken = body.accessToken;
   tokenExpiresAtMs = body.accessTokenExpirationTimestampMs ?? Date.now() + 30 * 60_000;
   return capturedToken;
+}
+
+async function waitForInternalSpotifyToken(): Promise<string | null> {
+  const expiresAt = Date.now() + INTERNAL_TOKEN_WAIT_MS;
+
+  while (Date.now() < expiresAt) {
+    await new Promise((resolve) => window.setTimeout(resolve, INTERNAL_TOKEN_POLL_MS));
+
+    const token = readInternalSpotifyToken();
+
+    if (token) {
+      return token;
+    }
+  }
+
+  return null;
 }
 
 function readInternalSpotifyToken(): string | null {
