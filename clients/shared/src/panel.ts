@@ -69,6 +69,7 @@ export function mountPanel(runtime: SpotifyPartyRuntime, options: PanelOptions):
 
 function render(snapshot: RuntimeSnapshot, form: ReturnType<typeof collectForm>): void {
   form.root.dataset.syncMode = snapshot.settings.syncMode;
+  form.root.dataset.role = snapshot.settings.role;
   writeIfBlurred(form.syncMode, snapshot.settings.syncMode);
   writeIfBlurred(form.syncUrl, snapshot.settings.syncUrl);
   writeIfBlurred(form.roomCode, snapshot.settings.roomCode);
@@ -104,38 +105,49 @@ function markup(title: string): string {
         <strong>${escapeHtml(title)}</strong>
         <span data-field="status">Idle</span>
       </header>
-      <div class="spotify-party-grid">
+      <div class="spotify-party-join">
         <label>Room <input data-field="room-code" spellcheck="false"></label>
-        <label>Role
-          <select data-field="role">
-            <option value="speaker">speaker</option>
-            <option value="host">host</option>
-          </select>
-        </label>
+        <div class="spotify-party-buttons spotify-party-connection-buttons">
+          <button type="button" data-action="create" class="spotify-party-host-only">Create</button>
+          <button type="button" data-action="connect">Connect</button>
+          <button type="button" data-action="disconnect">Disconnect</button>
+        </div>
       </div>
-      <label>Name <input data-field="name" spellcheck="false"></label>
-      <label>Host token <input data-field="host-token" spellcheck="false"></label>
-      <div class="spotify-party-grid">
-        <label>Calibration <input data-field="calibration-ms" type="number" step="10"></label>
-        <label>Command lead <input data-field="command-lead-ms" type="number" step="10"></label>
-      </div>
-      <div class="spotify-party-buttons">
-        <button type="button" data-action="create">Create</button>
-        <button type="button" data-action="connect">Connect</button>
-        <button type="button" data-action="disconnect">Disconnect</button>
-      </div>
-      <div class="spotify-party-buttons">
-        <button type="button" data-action="schedule">Sync Track</button>
-        <button type="button" data-action="pause">Pause</button>
-        <button type="button" data-action="resume">Resume</button>
-        <button type="button" data-action="max-volume">Max Vol</button>
-      </div>
-      <div class="spotify-party-buttons">
-        <button type="button" data-cal="-50">-50</button>
-        <button type="button" data-cal="-10">-10</button>
-        <button type="button" data-cal="10">+10</button>
-        <button type="button" data-cal="50">+50</button>
-      </div>
+      <button class="spotify-party-primary spotify-party-host-only" type="button" data-action="schedule">Sync Track</button>
+      <details class="spotify-party-setup">
+        <summary>Setup</summary>
+        <div class="spotify-party-grid">
+          <label>Role
+            <select data-field="role">
+              <option value="speaker">speaker</option>
+              <option value="host">host</option>
+            </select>
+          </label>
+          <label>Name <input data-field="name" spellcheck="false"></label>
+        </div>
+        <label class="spotify-party-host-only">Host token <input data-field="host-token" spellcheck="false"></label>
+      </details>
+      <details class="spotify-party-host-controls spotify-party-host-only">
+        <summary>Host controls</summary>
+        <div class="spotify-party-buttons">
+          <button type="button" data-action="pause">Pause</button>
+          <button type="button" data-action="resume">Resume</button>
+          <button type="button" data-action="max-volume">Max Vol</button>
+        </div>
+      </details>
+      <details class="spotify-party-tuning">
+        <summary>Tuning</summary>
+        <div class="spotify-party-grid">
+          <label>Calibration <input data-field="calibration-ms" type="number" step="10"></label>
+          <label>Command lead <input data-field="command-lead-ms" type="number" step="10"></label>
+        </div>
+        <div class="spotify-party-buttons">
+          <button type="button" data-cal="-50">-50</button>
+          <button type="button" data-cal="-10">-10</button>
+          <button type="button" data-cal="10">+10</button>
+          <button type="button" data-cal="50">+50</button>
+        </div>
+      </details>
       <details class="spotify-party-advanced">
         <summary>Advanced</summary>
         <label>Sync service
@@ -274,6 +286,9 @@ function injectStyles(): void {
       gap: 4px;
       color: #cbd5e1;
     }
+    .spotify-party-root[data-role="speaker"] .spotify-party-host-only {
+      display: none;
+    }
     .spotify-party-advanced {
       display: grid;
       gap: 8px;
@@ -281,6 +296,21 @@ function injectStyles(): void {
       padding-top: 8px;
     }
     .spotify-party-advanced summary {
+      color: #cbd5e1;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .spotify-party-setup,
+    .spotify-party-host-controls,
+    .spotify-party-tuning {
+      display: grid;
+      gap: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      padding-top: 8px;
+    }
+    .spotify-party-setup summary,
+    .spotify-party-host-controls summary,
+    .spotify-party-tuning summary {
       color: #cbd5e1;
       cursor: pointer;
       font-weight: 700;
@@ -300,13 +330,18 @@ function injectStyles(): void {
       font: inherit;
     }
     .spotify-party-grid,
-    .spotify-party-buttons {
+    .spotify-party-buttons,
+    .spotify-party-join {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
     }
     .spotify-party-buttons {
       grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+    .spotify-party-connection-buttons {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-self: end;
     }
     .spotify-party-buttons button {
       min-height: 30px;
@@ -321,6 +356,19 @@ function injectStyles(): void {
     }
     .spotify-party-buttons button:hover {
       background: #475569;
+    }
+    .spotify-party-primary {
+      min-height: 40px;
+      border: 0;
+      border-radius: 6px;
+      color: #06120b;
+      background: #1ed760;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 800;
+    }
+    .spotify-party-primary:hover {
+      background: #22c55e;
     }
     .spotify-party-members {
       display: grid;

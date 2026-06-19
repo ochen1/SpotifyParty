@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SpotifyParty
 // @namespace    https://github.com/local/spotify-party
-// @version      0.1.3
+// @version      0.1.4
 // @description  Sync Spotify web playback with SpotifyParty rooms.
 // @match        https://open.spotify.com/*
 // @homepageURL  https://github.com/ochen1/SpotifyParty
@@ -216,6 +216,7 @@
   }
   function render(snapshot, form) {
     form.root.dataset.syncMode = snapshot.settings.syncMode;
+    form.root.dataset.role = snapshot.settings.role;
     writeIfBlurred(form.syncMode, snapshot.settings.syncMode);
     writeIfBlurred(form.syncUrl, snapshot.settings.syncUrl);
     writeIfBlurred(form.roomCode, snapshot.settings.roomCode);
@@ -245,38 +246,49 @@
         <strong>${escapeHtml(title)}</strong>
         <span data-field="status">Idle</span>
       </header>
-      <div class="spotify-party-grid">
+      <div class="spotify-party-join">
         <label>Room <input data-field="room-code" spellcheck="false"></label>
-        <label>Role
-          <select data-field="role">
-            <option value="speaker">speaker</option>
-            <option value="host">host</option>
-          </select>
-        </label>
+        <div class="spotify-party-buttons spotify-party-connection-buttons">
+          <button type="button" data-action="create" class="spotify-party-host-only">Create</button>
+          <button type="button" data-action="connect">Connect</button>
+          <button type="button" data-action="disconnect">Disconnect</button>
+        </div>
       </div>
-      <label>Name <input data-field="name" spellcheck="false"></label>
-      <label>Host token <input data-field="host-token" spellcheck="false"></label>
-      <div class="spotify-party-grid">
-        <label>Calibration <input data-field="calibration-ms" type="number" step="10"></label>
-        <label>Command lead <input data-field="command-lead-ms" type="number" step="10"></label>
-      </div>
-      <div class="spotify-party-buttons">
-        <button type="button" data-action="create">Create</button>
-        <button type="button" data-action="connect">Connect</button>
-        <button type="button" data-action="disconnect">Disconnect</button>
-      </div>
-      <div class="spotify-party-buttons">
-        <button type="button" data-action="schedule">Sync Track</button>
-        <button type="button" data-action="pause">Pause</button>
-        <button type="button" data-action="resume">Resume</button>
-        <button type="button" data-action="max-volume">Max Vol</button>
-      </div>
-      <div class="spotify-party-buttons">
-        <button type="button" data-cal="-50">-50</button>
-        <button type="button" data-cal="-10">-10</button>
-        <button type="button" data-cal="10">+10</button>
-        <button type="button" data-cal="50">+50</button>
-      </div>
+      <button class="spotify-party-primary spotify-party-host-only" type="button" data-action="schedule">Sync Track</button>
+      <details class="spotify-party-setup">
+        <summary>Setup</summary>
+        <div class="spotify-party-grid">
+          <label>Role
+            <select data-field="role">
+              <option value="speaker">speaker</option>
+              <option value="host">host</option>
+            </select>
+          </label>
+          <label>Name <input data-field="name" spellcheck="false"></label>
+        </div>
+        <label class="spotify-party-host-only">Host token <input data-field="host-token" spellcheck="false"></label>
+      </details>
+      <details class="spotify-party-host-controls spotify-party-host-only">
+        <summary>Host controls</summary>
+        <div class="spotify-party-buttons">
+          <button type="button" data-action="pause">Pause</button>
+          <button type="button" data-action="resume">Resume</button>
+          <button type="button" data-action="max-volume">Max Vol</button>
+        </div>
+      </details>
+      <details class="spotify-party-tuning">
+        <summary>Tuning</summary>
+        <div class="spotify-party-grid">
+          <label>Calibration <input data-field="calibration-ms" type="number" step="10"></label>
+          <label>Command lead <input data-field="command-lead-ms" type="number" step="10"></label>
+        </div>
+        <div class="spotify-party-buttons">
+          <button type="button" data-cal="-50">-50</button>
+          <button type="button" data-cal="-10">-10</button>
+          <button type="button" data-cal="10">+10</button>
+          <button type="button" data-cal="50">+50</button>
+        </div>
+      </details>
       <details class="spotify-party-advanced">
         <summary>Advanced</summary>
         <label>Sync service
@@ -403,6 +415,9 @@
       gap: 4px;
       color: #cbd5e1;
     }
+    .spotify-party-root[data-role="speaker"] .spotify-party-host-only {
+      display: none;
+    }
     .spotify-party-advanced {
       display: grid;
       gap: 8px;
@@ -410,6 +425,21 @@
       padding-top: 8px;
     }
     .spotify-party-advanced summary {
+      color: #cbd5e1;
+      cursor: pointer;
+      font-weight: 700;
+    }
+    .spotify-party-setup,
+    .spotify-party-host-controls,
+    .spotify-party-tuning {
+      display: grid;
+      gap: 8px;
+      border-top: 1px solid rgba(255, 255, 255, 0.1);
+      padding-top: 8px;
+    }
+    .spotify-party-setup summary,
+    .spotify-party-host-controls summary,
+    .spotify-party-tuning summary {
       color: #cbd5e1;
       cursor: pointer;
       font-weight: 700;
@@ -429,13 +459,18 @@
       font: inherit;
     }
     .spotify-party-grid,
-    .spotify-party-buttons {
+    .spotify-party-buttons,
+    .spotify-party-join {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 8px;
     }
     .spotify-party-buttons {
       grid-template-columns: repeat(4, minmax(0, 1fr));
+    }
+    .spotify-party-connection-buttons {
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      align-self: end;
     }
     .spotify-party-buttons button {
       min-height: 30px;
@@ -450,6 +485,19 @@
     }
     .spotify-party-buttons button:hover {
       background: #475569;
+    }
+    .spotify-party-primary {
+      min-height: 40px;
+      border: 0;
+      border-radius: 6px;
+      color: #06120b;
+      background: #1ed760;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 800;
+    }
+    .spotify-party-primary:hover {
+      background: #22c55e;
     }
     .spotify-party-members {
       display: grid;
@@ -526,6 +574,7 @@
     driftTimer = null;
     activeSchedule = null;
     lastDriftMs = null;
+    correctionRetryAfterMs = 0;
     pendingPings = /* @__PURE__ */ new Map();
     subscribe(listener) {
       this.listeners.add(listener);
@@ -583,7 +632,11 @@
         this.startTimers();
         this.setStatus("Connected");
       });
-      socket.addEventListener("message", (event) => this.handleRawMessage(String(event.data)));
+      socket.addEventListener("message", (event) => {
+        void this.handleRawMessage(String(event.data)).catch((error) => {
+          this.setStatus(formatRuntimeError(error));
+        });
+      });
       socket.addEventListener("close", () => {
         this.stopTimers();
         if (this.socket === socket) {
@@ -607,7 +660,8 @@
         this.setStatus("No Spotify track is playing");
         return;
       }
-      await this.adapter.setVolume(1);
+      await this.adapter.setVolume(1).catch(() => {
+      });
       const startServerMs = this.clock.serverNowMs() + DEFAULT_START_DELAY_MS;
       const commandId = randomId("play_");
       this.send({
@@ -701,7 +755,8 @@
       this.lastDriftMs = null;
       this.emit();
       this.setStatus("Preparing playback...");
-      await this.adapter.setVolume(1);
+      await this.adapter.setVolume(1).catch(() => {
+      });
       const stats = this.clock.getStats();
       const runAtLocalMs = schedule.startServerMs - stats.offsetMs - this.settings.commandLeadMs;
       await sleep(runAtLocalMs - monotonicNowMs());
@@ -720,7 +775,13 @@
         clearInterval(this.driftTimer);
       }
       this.driftTimer = window.setInterval(async () => {
-        const state = await this.adapter.getState();
+        const state = await this.adapter.getState().catch((error) => {
+          this.setStatus(formatRuntimeError(error));
+          return null;
+        });
+        if (!state) {
+          return;
+        }
         const stats = this.clock.getStats();
         const timing = evaluatePlaybackTiming({
           schedule,
@@ -730,12 +791,17 @@
         });
         this.player = state;
         this.lastDriftMs = timing.driftMs;
-        if (timing.correction === "hard" && state.isPlaying) {
-          await this.adapter.seek(expectedPositionMs({
-            schedule,
-            serverNowMs: this.clock.serverNowMs(),
-            audioOffsetMs: this.settings.calibrationMs
-          }));
+        if (timing.correction === "hard" && state.isPlaying && Date.now() >= this.correctionRetryAfterMs) {
+          await this.adapter.seek(
+            expectedPositionMs({
+              schedule,
+              serverNowMs: this.clock.serverNowMs(),
+              audioOffsetMs: this.settings.calibrationMs
+            })
+          ).catch((error) => {
+            this.correctionRetryAfterMs = Date.now() + 1e4;
+            this.setStatus(formatRuntimeError(error));
+          });
         }
         this.send({
           type: "drift_report",
@@ -853,10 +919,14 @@
     url.pathname = `${url.pathname.replace(/\/$/, "")}/ws/${encodeURIComponent(roomCode.trim())}`;
     return url.toString();
   }
+  function formatRuntimeError(error) {
+    return error instanceof Error ? error.message : String(error);
+  }
 
   // clients/tampermonkey/src/index.ts
   var INTERNAL_TOKEN_WAIT_MS = 5e3;
   var INTERNAL_TOKEN_POLL_MS = 250;
+  var SPOTIFY_RATE_LIMIT_BACKOFF_MS = 6e4;
   var capturedToken = null;
   var tokenExpiresAtMs = 0;
   var legacyTokenRetryAfterMs = 0;
@@ -971,12 +1041,12 @@
     if (!response.ok) {
       if (response.status === 429) {
         const retryAfterSeconds = Number(response.headers.get("retry-after"));
-        if (Number.isFinite(retryAfterSeconds)) {
-          apiRetryAfterMs = Math.max(apiRetryAfterMs, Date.now() + retryAfterSeconds * 1e3);
-        }
+        const retryAfterMs = Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0 ? retryAfterSeconds * 1e3 : SPOTIFY_RATE_LIMIT_BACKOFF_MS;
+        apiRetryAfterMs = Math.max(apiRetryAfterMs, Date.now() + retryAfterMs);
       }
       const body = await response.text().catch(() => "");
-      throw new Error(`Spotify API failed: HTTP ${response.status} ${body}`.trim());
+      const message = response.status === 429 ? "Spotify is rate limiting this browser. Wait a minute, refresh Spotify, start any track once, then reconnect." : `Spotify API failed: HTTP ${response.status} ${body}`.trim();
+      throw new Error(message);
     }
     return await response.json();
   }

@@ -33,6 +33,7 @@ interface SpotifyWebpackWindow extends Window {
 
 const INTERNAL_TOKEN_WAIT_MS = 5_000;
 const INTERNAL_TOKEN_POLL_MS = 250;
+const SPOTIFY_RATE_LIMIT_BACKOFF_MS = 60_000;
 
 let capturedToken: string | null = null;
 let tokenExpiresAtMs = 0;
@@ -168,14 +169,19 @@ async function spotifyFetch<T = unknown>(url: string, init: RequestInit = {}): P
   if (!response.ok) {
     if (response.status === 429) {
       const retryAfterSeconds = Number(response.headers.get("retry-after"));
-
-      if (Number.isFinite(retryAfterSeconds)) {
-        apiRetryAfterMs = Math.max(apiRetryAfterMs, Date.now() + retryAfterSeconds * 1000);
-      }
+      const retryAfterMs =
+        Number.isFinite(retryAfterSeconds) && retryAfterSeconds > 0
+          ? retryAfterSeconds * 1000
+          : SPOTIFY_RATE_LIMIT_BACKOFF_MS;
+      apiRetryAfterMs = Math.max(apiRetryAfterMs, Date.now() + retryAfterMs);
     }
 
     const body = await response.text().catch(() => "");
-    throw new Error(`Spotify API failed: HTTP ${response.status} ${body}`.trim());
+    const message =
+      response.status === 429
+        ? "Spotify is rate limiting this browser. Wait a minute, refresh Spotify, start any track once, then reconnect."
+        : `Spotify API failed: HTTP ${response.status} ${body}`.trim();
+    throw new Error(message);
   }
 
   return (await response.json()) as T;

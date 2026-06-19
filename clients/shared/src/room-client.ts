@@ -47,6 +47,7 @@ export class SpotifyPartyRuntime {
   private driftTimer: number | null = null;
   private activeSchedule: ScheduledPlayback | null = null;
   private lastDriftMs: number | null = null;
+  private correctionRetryAfterMs = 0;
   private readonly pendingPings = new Map<number, number>();
 
   constructor(
@@ -127,7 +128,11 @@ export class SpotifyPartyRuntime {
       this.setStatus("Connected");
     });
 
-    socket.addEventListener("message", (event) => this.handleRawMessage(String(event.data)));
+    socket.addEventListener("message", (event) => {
+      void this.handleRawMessage(String(event.data)).catch((error) => {
+        this.setStatus(formatRuntimeError(error));
+      });
+    });
     socket.addEventListener("close", () => {
       this.stopTimers();
 
@@ -157,7 +162,9 @@ export class SpotifyPartyRuntime {
       return;
     }
 
-    await this.adapter.setVolume(1);
+    await this.adapter.setVolume(1).catch(() => {
+      // Volume is helpful for party mode, but it should never block scheduling playback.
+    });
     const startServerMs = this.clock.serverNowMs() + DEFAULT_START_DELAY_MS;
     const commandId = randomId("play_");
 
@@ -260,7 +267,9 @@ export class SpotifyPartyRuntime {
     this.emit();
     this.setStatus("Preparing playback...");
 
-    await this.adapter.setVolume(1);
+    await this.adapter.setVolume(1).catch(() => {
+      // Keep playback scheduling resilient when Spotify rate-limits volume changes.
+    });
     const stats = this.clock.getStats();
     const runAtLocalMs = schedule.startServerMs - stats.offsetMs - this.settings.commandLeadMs;
     await sleep(runAtLocalMs - monotonicNowMs());
@@ -283,7 +292,15 @@ export class SpotifyPartyRuntime {
     }
 
     this.driftTimer = window.setInterval(async () => {
-      const state = await this.adapter.getState();
+      const state = await this.adapter.getState().catch((error) => {
+        this.setStatus(formatRuntimeError(error));
+        return null;
+      });
+
+      if (!state) {
+        return;
+      }
+
       const stats = this.clock.getStats();
       const timing = evaluatePlaybackTiming({
         schedule,
@@ -295,12 +312,19 @@ export class SpotifyPartyRuntime {
       this.player = state;
       this.lastDriftMs = timing.driftMs;
 
-      if (timing.correction === "hard" && state.isPlaying) {
-        await this.adapter.seek(expectedPositionMs({
-          schedule,
-          serverNowMs: this.clock.serverNowMs(),
-          audioOffsetMs: this.settings.calibrationMs
-        }));
+      if (timing.correction === "hard" && state.isPlaying && Date.now() >= this.correctionRetryAfterMs) {
+        await this.adapter
+          .seek(
+            expectedPositionMs({
+              schedule,
+              serverNowMs: this.clock.serverNowMs(),
+              audioOffsetMs: this.settings.calibrationMs
+            })
+          )
+          .catch((error) => {
+            this.correctionRetryAfterMs = Date.now() + 10_000;
+            this.setStatus(formatRuntimeError(error));
+          });
       }
 
       this.send({
@@ -435,4 +459,8 @@ function roomWsUrl(syncUrl: string, roomCode: string): string {
   url.protocol = url.protocol === "http:" ? "ws:" : "wss:";
   url.pathname = `${url.pathname.replace(/\/$/, "")}/ws/${encodeURIComponent(roomCode.trim())}`;
   return url.toString();
+}
+
+function formatRuntimeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
