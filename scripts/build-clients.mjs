@@ -1,7 +1,10 @@
 import { mkdir } from "node:fs/promises";
 import { build } from "esbuild";
+import packageJson from "../package.json" with { type: "json" };
 
 await mkdir("dist", { recursive: true });
+
+const userscriptUrl = "https://raw.githubusercontent.com/ochen1/SpotifyParty/main/dist/spotify-party.user.js";
 
 const common = {
   bundle: true,
@@ -29,10 +32,13 @@ await build({
   banner: {
     js: `// ==UserScript==
 // @name         SpotifyParty
-// @namespace    https://github.com/local/spotify-party
-// @version      0.1.0
+// @namespace    https://github.com/ochen1/SpotifyParty
+// @version      ${packageJson.version}
 // @description  Sync Spotify web playback with SpotifyParty rooms.
 // @match        https://open.spotify.com/*
+// @homepageURL  https://github.com/ochen1/SpotifyParty
+// @downloadURL  ${userscriptUrl}
+// @updateURL    ${userscriptUrl}
 // @run-at       document-start
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
