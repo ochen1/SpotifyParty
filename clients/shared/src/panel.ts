@@ -96,6 +96,32 @@ function render(snapshot: RuntimeSnapshot, form: ReturnType<typeof collectForm>)
       return row;
     })
   );
+  form.logs.replaceChildren(
+    ...snapshot.logs.map((entry) => {
+      const row = document.createElement("div");
+      row.className = `spotify-party-log spotify-party-log-${entry.level}`;
+
+      const meta = document.createElement("span");
+      meta.className = "spotify-party-log-meta";
+      meta.textContent = `${formatTime(entry.atMs)} ${entry.level}`;
+
+      const messageElement = document.createElement("span");
+      messageElement.className = "spotify-party-log-message";
+      messageElement.textContent = entry.message;
+
+      row.appendChild(meta);
+      row.appendChild(messageElement);
+
+      if (entry.details) {
+        const detailsElement = document.createElement("span");
+        detailsElement.className = "spotify-party-log-details";
+        detailsElement.textContent = entry.details;
+        row.appendChild(detailsElement);
+      }
+
+      return row;
+    })
+  );
 }
 
 function markup(title: string): string {
@@ -165,6 +191,10 @@ function markup(title: string): string {
         <span data-field="drift">Drift n/a</span>
       </footer>
       <div class="spotify-party-members" data-field="members"></div>
+      <details class="spotify-party-activity">
+        <summary>Activity</summary>
+        <div class="spotify-party-logs" data-field="logs"></div>
+      </details>
     </section>
   `;
 }
@@ -184,7 +214,8 @@ function collectForm(root: HTMLElement) {
     clock: text(root, "clock"),
     track: text(root, "track"),
     drift: text(root, "drift"),
-    members: root.querySelector("[data-field='members']") as HTMLDivElement
+    members: root.querySelector("[data-field='members']") as HTMLDivElement,
+    logs: root.querySelector("[data-field='logs']") as HTMLDivElement
   };
 }
 
@@ -231,6 +262,15 @@ function escapeHtml(value: string): string {
   const span = document.createElement("span");
   span.textContent = value;
   return span.innerHTML;
+}
+
+function formatTime(atMs: number): string {
+  return new Date(atMs).toLocaleTimeString([], {
+    hour12: false,
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit"
+  });
 }
 
 let stylesInjected = false;
@@ -303,7 +343,8 @@ function injectStyles(): void {
     }
     .spotify-party-setup,
     .spotify-party-host-controls,
-    .spotify-party-tuning {
+    .spotify-party-tuning,
+    .spotify-party-activity {
       display: grid;
       gap: 8px;
       border-top: 1px solid rgba(255, 255, 255, 0.1);
@@ -311,7 +352,8 @@ function injectStyles(): void {
     }
     .spotify-party-setup summary,
     .spotify-party-host-controls summary,
-    .spotify-party-tuning summary {
+    .spotify-party-tuning summary,
+    .spotify-party-activity summary {
       color: #cbd5e1;
       cursor: pointer;
       font-weight: 700;
@@ -382,6 +424,38 @@ function injectStyles(): void {
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.07);
       color: #e2e8f0;
+    }
+    .spotify-party-logs {
+      display: grid;
+      gap: 5px;
+      max-height: 180px;
+      overflow: auto;
+    }
+    .spotify-party-log {
+      display: grid;
+      gap: 2px;
+      padding: 6px;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.07);
+      color: #e2e8f0;
+      overflow-wrap: anywhere;
+    }
+    .spotify-party-log-meta {
+      color: #94a3b8;
+      font-size: 10px;
+      text-transform: uppercase;
+    }
+    .spotify-party-log-message {
+      font-weight: 700;
+    }
+    .spotify-party-log-details {
+      color: #cbd5e1;
+    }
+    .spotify-party-log-warn {
+      background: rgba(245, 158, 11, 0.16);
+    }
+    .spotify-party-log-error {
+      background: rgba(239, 68, 68, 0.18);
     }
   `;
   document.documentElement.appendChild(style);
