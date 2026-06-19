@@ -186,6 +186,7 @@
       form.commandLeadMs
     ]) {
       element.addEventListener("change", save);
+      element.addEventListener("input", save);
     }
     const unsubscribe = runtime.subscribe((snapshot) => render(snapshot, form));
     if (!options.initiallyOpen) {

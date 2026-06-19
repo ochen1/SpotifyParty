@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SpotifyParty
 // @namespace    https://github.com/local/spotify-party
-// @version      0.1.4
+// @version      0.1.5
 // @description  Sync Spotify web playback with SpotifyParty rooms.
 // @match        https://open.spotify.com/*
 // @homepageURL  https://github.com/ochen1/SpotifyParty
@@ -201,6 +201,7 @@
       form.commandLeadMs
     ]) {
       element.addEventListener("change", save);
+      element.addEventListener("input", save);
     }
     const unsubscribe = runtime.subscribe((snapshot) => render(snapshot, form));
     if (!options.initiallyOpen) {

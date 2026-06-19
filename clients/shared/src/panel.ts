@@ -49,6 +49,7 @@ export function mountPanel(runtime: SpotifyPartyRuntime, options: PanelOptions):
     form.commandLeadMs
   ]) {
     element.addEventListener("change", save);
+    element.addEventListener("input", save);
   }
 
   const unsubscribe = runtime.subscribe((snapshot) => render(snapshot, form));
