@@ -219,7 +219,29 @@
       ...snapshot.members.map((member) => {
         const row = document.createElement("div");
         row.className = "spotify-party-member";
-        row.textContent = `${member.name} | ${member.role} | ${member.syncQuality}`;
+        const nowMs = Date.now();
+        const state = member.playerState;
+        const drift = member.lastDriftReport;
+        const title = document.createElement("div");
+        title.className = "spotify-party-member-title";
+        title.textContent = `${member.name} | ${member.role} | ${member.adapter}`;
+        const sync = document.createElement("div");
+        sync.textContent = `Sync ${member.syncQuality} | ${formatNullableMs(member.uncertaintyMs)} uncertainty | cal ${formatSignedMs(member.calibrationMs)}`;
+        const playback = document.createElement("div");
+        playback.textContent = state ? `${state.isPlaying ? "Playing" : "Paused"} ${compactOrNone(state.uri)} | ${formatPosition(state.progressMs, state.durationMs)} | vol ${formatVolume(state.volume)}` : "Playback unknown";
+        const heartbeat = document.createElement("div");
+        heartbeat.textContent = `Last state ${formatAge(member.playerStateAtServerMs, nowMs)} | last seen ${formatAge(member.lastSeenServerMs, nowMs)}`;
+        const driftLine = document.createElement("div");
+        driftLine.textContent = drift ? `Drift ${formatSignedMs(drift.driftMs)} | action ${drift.correctionAction} | report ${formatAge(drift.reportedAtServerMs, nowMs)}` : "Drift not reported yet";
+        const detail = document.createElement("div");
+        detail.className = "spotify-party-member-detail";
+        detail.textContent = drift ? `expected ${compactOrNone(drift.expectedTrackUri)} @ ${formatMs(drift.expectedPositionMs)} | observed ${compactOrNone(drift.actualTrackUri)} @ ${formatMs(drift.observedPositionMs)} | ${drift.isPlaying ? "playing" : "paused"}` : `joined ${formatAge(member.joinedAtServerMs, nowMs)}`;
+        row.appendChild(title);
+        row.appendChild(sync);
+        row.appendChild(playback);
+        row.appendChild(heartbeat);
+        row.appendChild(driftLine);
+        row.appendChild(detail);
         return row;
       })
     );
@@ -369,6 +391,38 @@
   }
   function compactUri(uri) {
     return uri.replace("spotify:track:", "track:");
+  }
+  function compactOrNone(uri) {
+    return uri ? compactUri(uri) : "none";
+  }
+  function formatPosition(progressMs, durationMs) {
+    return durationMs > 0 ? `${formatMs(progressMs)} / ${formatMs(durationMs)}` : formatMs(progressMs);
+  }
+  function formatMs(value) {
+    return `${Math.max(0, Math.round(value))}ms`;
+  }
+  function formatSignedMs(value) {
+    const rounded = Math.round(value);
+    return `${rounded > 0 ? "+" : ""}${rounded}ms`;
+  }
+  function formatNullableMs(value) {
+    return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}ms` : "n/a";
+  }
+  function formatVolume(value) {
+    return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 100)}%` : "n/a";
+  }
+  function formatAge(valueMs, nowMs) {
+    if (typeof valueMs !== "number" || !Number.isFinite(valueMs)) {
+      return "n/a";
+    }
+    const ageMs = Math.max(0, nowMs - valueMs);
+    if (ageMs < 1e3) {
+      return `${Math.round(ageMs)}ms ago`;
+    }
+    if (ageMs < 6e4) {
+      return `${(ageMs / 1e3).toFixed(1)}s ago`;
+    }
+    return `${Math.round(ageMs / 6e4)}m ago`;
   }
   function escapeHtml(value) {
     const span = document.createElement("span");
@@ -524,14 +578,23 @@
     .spotify-party-members {
       display: grid;
       gap: 4px;
-      max-height: 96px;
+      max-height: 220px;
       overflow: auto;
     }
     .spotify-party-member {
+      display: grid;
+      gap: 3px;
       padding: 5px 6px;
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.07);
       color: #e2e8f0;
+      overflow-wrap: anywhere;
+    }
+    .spotify-party-member-title {
+      font-weight: 800;
+    }
+    .spotify-party-member-detail {
+      color: #94a3b8;
     }
     .spotify-party-logs {
       display: grid;
@@ -722,7 +785,7 @@
         this.setStatus("No Spotify track is playing", void 0, "warn");
         return;
       }
-      this.log("Scheduling current track", `${compactTrackUri(state.uri)} at ${formatMs(state.progressMs)}`);
+      this.log("Scheduling current track", `${compactTrackUri(state.uri)} at ${formatMs2(state.progressMs)}`);
       await this.adapter.setVolume(1).catch(() => {
         this.log("Skipped local max-volume before schedule", "Spotify rejected volume command", "warn");
       });
@@ -817,9 +880,9 @@
           this.setStatus("Resumed");
           return;
         case "seek_all":
-          this.log("Applying seek command", `command=${message.commandId}, position=${formatMs(message.positionMs)}`);
+          this.log("Applying seek command", `command=${message.commandId}, position=${formatMs2(message.positionMs)}`);
           await this.runAtServerTime(message.startServerMs, () => this.adapter.seek(message.positionMs), "seek");
-          this.setStatus("Seeked", `position=${formatMs(message.positionMs)}`);
+          this.setStatus("Seeked", `position=${formatMs2(message.positionMs)}`);
           return;
         case "set_volume_all":
           this.log("Applying volume command", `volume=${message.volume}`);
@@ -837,7 +900,7 @@
       this.emit();
       this.setStatus(
         "Preparing playback...",
-        `${compactTrackUri(schedule.trackUri)} at ${formatMs(schedule.startPositionMs)}`
+        `${compactTrackUri(schedule.trackUri)} at ${formatMs2(schedule.startPositionMs)}`
       );
       await this.adapter.setVolume(1).catch(() => {
         this.log("Skipped max-volume before playback", "Spotify rejected volume command", "warn");
@@ -852,7 +915,7 @@
       const commandPositionMs = Math.max(0, schedule.startPositionMs + this.settings.calibrationMs);
       this.log(
         "Starting scheduled track",
-        `${compactTrackUri(schedule.trackUri)} at ${formatMs(commandPositionMs)} (cal=${this.settings.calibrationMs}ms)`
+        `${compactTrackUri(schedule.trackUri)} at ${formatMs2(commandPositionMs)} (cal=${this.settings.calibrationMs}ms)`
       );
       await this.adapter.playUri(schedule.trackUri, commandPositionMs);
       this.setStatus("Playback started");
@@ -885,16 +948,25 @@
         });
         this.player = state;
         this.lastDriftMs = timing.driftMs;
+        let correctionAction = "none";
+        const needsCorrection = state.uri !== schedule.trackUri || !state.isPlaying || timing.correction === "hard";
         if (Date.now() >= this.correctionRetryAfterMs) {
-          await this.correctPlaybackIfNeeded(schedule, state, timing);
+          correctionAction = await this.correctPlaybackIfNeeded(schedule, state, timing);
+        } else if (needsCorrection) {
+          correctionAction = "throttled";
         }
         this.send({
           type: "drift_report",
           commandId: schedule.commandId,
+          expectedTrackUri: schedule.trackUri,
+          actualTrackUri: state.uri,
+          isPlaying: state.isPlaying,
           driftMs: timing.driftMs,
           expectedPositionMs: timing.expectedPositionMs,
           observedPositionMs: state.progressMs,
-          uncertaintyMs: stats.uncertaintyMs
+          uncertaintyMs: stats.uncertaintyMs,
+          correction: timing.correction,
+          correctionAction
         });
         this.emit();
       }, 500);
@@ -908,40 +980,42 @@
       const wrongTrack = state.uri !== schedule.trackUri;
       const wrongPlaybackState = !state.isPlaying;
       if (!wrongTrack && !wrongPlaybackState && timing.correction !== "hard") {
-        return;
+        return "none";
       }
       this.correctionRetryAfterMs = Date.now() + CORRECTION_RETRY_MS;
       try {
         if (wrongTrack) {
           this.log(
             "Correcting playback state: wrong track",
-            `expected=${compactTrackUri(schedule.trackUri)}, actual=${state.uri ? compactTrackUri(state.uri) : "none"}, position=${formatMs(expectedMs)}`,
+            `expected=${compactTrackUri(schedule.trackUri)}, actual=${state.uri ? compactTrackUri(state.uri) : "none"}, position=${formatMs2(expectedMs)}`,
             "warn"
           );
           await this.adapter.playUri(schedule.trackUri, expectedMs);
           this.setStatus("Corrected track", compactTrackUri(schedule.trackUri));
-          return;
+          return "play_track";
         }
         if (wrongPlaybackState) {
           this.log(
             "Correcting playback state: paused",
-            `track=${compactTrackUri(schedule.trackUri)}, position=${formatMs(expectedMs)}`,
+            `track=${compactTrackUri(schedule.trackUri)}, position=${formatMs2(expectedMs)}`,
             "warn"
           );
           await this.adapter.playUri(schedule.trackUri, expectedMs);
           this.setStatus("Corrected playback state");
-          return;
+          return "resume_track";
         }
         this.log(
           "Correcting out-of-sync playback",
-          `drift=${timing.driftMs.toFixed(0)}ms, position=${formatMs(expectedMs)}`,
+          `drift=${timing.driftMs.toFixed(0)}ms, position=${formatMs2(expectedMs)}`,
           "warn"
         );
         await this.adapter.seek(expectedMs);
         this.setStatus("Corrected drift", `drift=${timing.driftMs.toFixed(0)}ms`);
+        return "seek";
       } catch (error) {
         this.correctionRetryAfterMs = Date.now() + 1e4;
         this.setStatus(formatRuntimeError(error), void 0, "error");
+        return "failed";
       }
     }
     startTimers() {
@@ -996,6 +1070,7 @@
       this.send({
         type: "member_state",
         state,
+        calibrationMs: this.settings.calibrationMs,
         syncQuality: stats.quality,
         uncertaintyMs: Number.isFinite(stats.uncertaintyMs) ? stats.uncertaintyMs : null
       });
@@ -1097,13 +1172,13 @@
       case "member_state":
         return `member_state ${message.state.uri ? compactTrackUri(message.state.uri) : "no track"}, quality=${message.syncQuality}`;
       case "schedule_playback":
-        return `schedule_playback ${compactTrackUri(message.payload.trackUri)} at ${formatMs(message.payload.startPositionMs)}`;
+        return `schedule_playback ${compactTrackUri(message.payload.trackUri)} at ${formatMs2(message.payload.startPositionMs)}`;
       case "pause_all":
         return `pause_all command=${message.commandId}`;
       case "resume_all":
         return `resume_all command=${message.commandId}`;
       case "seek_all":
-        return `seek_all command=${message.commandId}, position=${formatMs(message.positionMs)}`;
+        return `seek_all command=${message.commandId}, position=${formatMs2(message.positionMs)}`;
       case "set_volume_all":
         return `set_volume_all command=${message.commandId}, volume=${message.volume}`;
     }
@@ -1112,7 +1187,7 @@
   function compactTrackUri(uri) {
     return uri.replace("spotify:track:", "track:");
   }
-  function formatMs(value) {
+  function formatMs2(value) {
     return `${Math.max(0, Math.round(value))}ms`;
   }
 

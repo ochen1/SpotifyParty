@@ -24,8 +24,12 @@ interface SocketSession {
   adapter: "spicetify" | "tampermonkey";
   joinedAtServerMs: number;
   lastSeenServerMs: number;
+  calibrationMs: number;
   syncQuality: RoomMember["syncQuality"];
   uncertaintyMs: number | null;
+  playerState: RoomMember["playerState"];
+  playerStateAtServerMs: number | null;
+  lastDriftReport: RoomMember["lastDriftReport"];
 }
 
 export default {
@@ -40,7 +44,7 @@ export default {
       return json({
         ok: true,
         name: "spotify-party-sync",
-        version: "0.1.0",
+        version: "0.1.10",
         serverNowMs: Date.now()
       });
     }
@@ -248,6 +252,8 @@ export class RoomDurableObject {
         });
         return;
       case "drift_report":
+        this.handleDriftReport(socket, message, serverReceiveMs);
+        await this.broadcastMembers();
         return;
     }
   }
@@ -276,8 +282,12 @@ export class RoomDurableObject {
       adapter: message.adapter,
       joinedAtServerMs: now,
       lastSeenServerMs: now,
+      calibrationMs: message.calibrationMs,
       syncQuality: "unsynced",
-      uncertaintyMs: null
+      uncertaintyMs: null,
+      playerState: null,
+      playerStateAtServerMs: null,
+      lastDriftReport: null
     };
 
     this.sessions.set(socket, session);
@@ -306,8 +316,41 @@ export class RoomDurableObject {
     }
 
     session.lastSeenServerMs = Date.now();
+    session.calibrationMs = message.calibrationMs;
     session.syncQuality = message.syncQuality;
     session.uncertaintyMs = message.uncertaintyMs;
+    session.playerState = message.state;
+    session.playerStateAtServerMs = session.lastSeenServerMs;
+    socket.serializeAttachment(session);
+  }
+
+  private handleDriftReport(
+    socket: WebSocket,
+    message: Extract<ClientMessage, { type: "drift_report" }>,
+    serverReceiveMs: number
+  ): void {
+    const session = this.sessions.get(socket);
+
+    if (!session) {
+      return;
+    }
+
+    session.lastSeenServerMs = serverReceiveMs;
+    session.syncQuality = qualityFromUncertainty(message.uncertaintyMs);
+    session.uncertaintyMs = message.uncertaintyMs;
+    session.lastDriftReport = {
+      commandId: message.commandId,
+      expectedTrackUri: message.expectedTrackUri,
+      actualTrackUri: message.actualTrackUri,
+      isPlaying: message.isPlaying,
+      driftMs: message.driftMs,
+      expectedPositionMs: message.expectedPositionMs,
+      observedPositionMs: message.observedPositionMs,
+      uncertaintyMs: message.uncertaintyMs,
+      correction: message.correction,
+      correctionAction: message.correctionAction,
+      reportedAtServerMs: serverReceiveMs
+    };
     socket.serializeAttachment(session);
   }
 
@@ -346,8 +389,12 @@ export class RoomDurableObject {
       adapter: session.adapter,
       joinedAtServerMs: session.joinedAtServerMs,
       lastSeenServerMs: session.lastSeenServerMs,
+      calibrationMs: session.calibrationMs ?? 0,
       syncQuality: session.syncQuality,
-      uncertaintyMs: session.uncertaintyMs
+      uncertaintyMs: session.uncertaintyMs,
+      playerState: session.playerState ?? null,
+      playerStateAtServerMs: session.playerStateAtServerMs ?? null,
+      lastDriftReport: session.lastDriftReport ?? null
     }));
   }
 
@@ -384,6 +431,22 @@ function makeRoomCode(): string {
   }
 
   return roomCode;
+}
+
+function qualityFromUncertainty(uncertaintyMs: number): RoomMember["syncQuality"] {
+  if (!Number.isFinite(uncertaintyMs)) {
+    return "unsynced";
+  }
+
+  if (uncertaintyMs <= 25) {
+    return "tight";
+  }
+
+  if (uncertaintyMs <= 60) {
+    return "usable";
+  }
+
+  return "loose";
 }
 
 function json(value: unknown, init?: ResponseInit): Response {

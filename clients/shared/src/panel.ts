@@ -92,7 +92,42 @@ function render(snapshot: RuntimeSnapshot, form: ReturnType<typeof collectForm>)
     ...snapshot.members.map((member) => {
       const row = document.createElement("div");
       row.className = "spotify-party-member";
-      row.textContent = `${member.name} | ${member.role} | ${member.syncQuality}`;
+      const nowMs = Date.now();
+      const state = member.playerState;
+      const drift = member.lastDriftReport;
+
+      const title = document.createElement("div");
+      title.className = "spotify-party-member-title";
+      title.textContent = `${member.name} | ${member.role} | ${member.adapter}`;
+
+      const sync = document.createElement("div");
+      sync.textContent = `Sync ${member.syncQuality} | ${formatNullableMs(member.uncertaintyMs)} uncertainty | cal ${formatSignedMs(member.calibrationMs)}`;
+
+      const playback = document.createElement("div");
+      playback.textContent = state
+        ? `${state.isPlaying ? "Playing" : "Paused"} ${compactOrNone(state.uri)} | ${formatPosition(state.progressMs, state.durationMs)} | vol ${formatVolume(state.volume)}`
+        : "Playback unknown";
+
+      const heartbeat = document.createElement("div");
+      heartbeat.textContent = `Last state ${formatAge(member.playerStateAtServerMs, nowMs)} | last seen ${formatAge(member.lastSeenServerMs, nowMs)}`;
+
+      const driftLine = document.createElement("div");
+      driftLine.textContent = drift
+        ? `Drift ${formatSignedMs(drift.driftMs)} | action ${drift.correctionAction} | report ${formatAge(drift.reportedAtServerMs, nowMs)}`
+        : "Drift not reported yet";
+
+      const detail = document.createElement("div");
+      detail.className = "spotify-party-member-detail";
+      detail.textContent = drift
+        ? `expected ${compactOrNone(drift.expectedTrackUri)} @ ${formatMs(drift.expectedPositionMs)} | observed ${compactOrNone(drift.actualTrackUri)} @ ${formatMs(drift.observedPositionMs)} | ${drift.isPlaying ? "playing" : "paused"}`
+        : `joined ${formatAge(member.joinedAtServerMs, nowMs)}`;
+
+      row.appendChild(title);
+      row.appendChild(sync);
+      row.appendChild(playback);
+      row.appendChild(heartbeat);
+      row.appendChild(driftLine);
+      row.appendChild(detail);
       return row;
     })
   );
@@ -258,6 +293,49 @@ function compactUri(uri: string): string {
   return uri.replace("spotify:track:", "track:");
 }
 
+function compactOrNone(uri: string | null): string {
+  return uri ? compactUri(uri) : "none";
+}
+
+function formatPosition(progressMs: number, durationMs: number): string {
+  return durationMs > 0 ? `${formatMs(progressMs)} / ${formatMs(durationMs)}` : formatMs(progressMs);
+}
+
+function formatMs(value: number): string {
+  return `${Math.max(0, Math.round(value))}ms`;
+}
+
+function formatSignedMs(value: number): string {
+  const rounded = Math.round(value);
+  return `${rounded > 0 ? "+" : ""}${rounded}ms`;
+}
+
+function formatNullableMs(value: number | null): string {
+  return typeof value === "number" && Number.isFinite(value) ? `${value.toFixed(1)}ms` : "n/a";
+}
+
+function formatVolume(value: number | null): string {
+  return typeof value === "number" && Number.isFinite(value) ? `${Math.round(value * 100)}%` : "n/a";
+}
+
+function formatAge(valueMs: number | null, nowMs: number): string {
+  if (typeof valueMs !== "number" || !Number.isFinite(valueMs)) {
+    return "n/a";
+  }
+
+  const ageMs = Math.max(0, nowMs - valueMs);
+
+  if (ageMs < 1000) {
+    return `${Math.round(ageMs)}ms ago`;
+  }
+
+  if (ageMs < 60_000) {
+    return `${(ageMs / 1000).toFixed(1)}s ago`;
+  }
+
+  return `${Math.round(ageMs / 60_000)}m ago`;
+}
+
 function escapeHtml(value: string): string {
   const span = document.createElement("span");
   span.textContent = value;
@@ -416,14 +494,23 @@ function injectStyles(): void {
     .spotify-party-members {
       display: grid;
       gap: 4px;
-      max-height: 96px;
+      max-height: 220px;
       overflow: auto;
     }
     .spotify-party-member {
+      display: grid;
+      gap: 3px;
       padding: 5px 6px;
       border-radius: 6px;
       background: rgba(255, 255, 255, 0.07);
       color: #e2e8f0;
+      overflow-wrap: anywhere;
+    }
+    .spotify-party-member-title {
+      font-weight: 800;
+    }
+    .spotify-party-member-detail {
+      color: #94a3b8;
     }
     .spotify-party-logs {
       display: grid;

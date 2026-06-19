@@ -11,6 +11,7 @@ import {
   type ClientMessage,
   type ClientSettings,
   type ClockStats,
+  type DriftCorrectionAction,
   type PlayerState,
   type RoomMember,
   type ScheduledPlayback,
@@ -364,17 +365,28 @@ export class SpotifyPartyRuntime {
       this.player = state;
       this.lastDriftMs = timing.driftMs;
 
+      let correctionAction: DriftCorrectionAction = "none";
+      const needsCorrection =
+        state.uri !== schedule.trackUri || !state.isPlaying || timing.correction === "hard";
+
       if (Date.now() >= this.correctionRetryAfterMs) {
-        await this.correctPlaybackIfNeeded(schedule, state, timing);
+        correctionAction = await this.correctPlaybackIfNeeded(schedule, state, timing);
+      } else if (needsCorrection) {
+        correctionAction = "throttled";
       }
 
       this.send({
         type: "drift_report",
         commandId: schedule.commandId,
+        expectedTrackUri: schedule.trackUri,
+        actualTrackUri: state.uri,
+        isPlaying: state.isPlaying,
         driftMs: timing.driftMs,
         expectedPositionMs: timing.expectedPositionMs,
         observedPositionMs: state.progressMs,
-        uncertaintyMs: stats.uncertaintyMs
+        uncertaintyMs: stats.uncertaintyMs,
+        correction: timing.correction,
+        correctionAction
       });
       this.emit();
     }, 500);
@@ -384,7 +396,7 @@ export class SpotifyPartyRuntime {
     schedule: ScheduledPlayback,
     state: PlayerState,
     timing: ReturnType<typeof evaluatePlaybackTiming>
-  ): Promise<void> {
+  ): Promise<DriftCorrectionAction> {
     const expectedMs = expectedPositionMs({
       schedule,
       serverNowMs: this.clock.serverNowMs(),
@@ -394,7 +406,7 @@ export class SpotifyPartyRuntime {
     const wrongPlaybackState = !state.isPlaying;
 
     if (!wrongTrack && !wrongPlaybackState && timing.correction !== "hard") {
-      return;
+      return "none";
     }
 
     this.correctionRetryAfterMs = Date.now() + CORRECTION_RETRY_MS;
@@ -408,7 +420,7 @@ export class SpotifyPartyRuntime {
         );
         await this.adapter.playUri(schedule.trackUri, expectedMs);
         this.setStatus("Corrected track", compactTrackUri(schedule.trackUri));
-        return;
+        return "play_track";
       }
 
       if (wrongPlaybackState) {
@@ -419,7 +431,7 @@ export class SpotifyPartyRuntime {
         );
         await this.adapter.playUri(schedule.trackUri, expectedMs);
         this.setStatus("Corrected playback state");
-        return;
+        return "resume_track";
       }
 
       this.log(
@@ -429,9 +441,11 @@ export class SpotifyPartyRuntime {
       );
       await this.adapter.seek(expectedMs);
       this.setStatus("Corrected drift", `drift=${timing.driftMs.toFixed(0)}ms`);
+      return "seek";
     } catch (error) {
       this.correctionRetryAfterMs = Date.now() + 10_000;
       this.setStatus(formatRuntimeError(error), undefined, "error");
+      return "failed";
     }
   }
 
@@ -495,6 +509,7 @@ export class SpotifyPartyRuntime {
     this.send({
       type: "member_state",
       state,
+      calibrationMs: this.settings.calibrationMs,
       syncQuality: stats.quality,
       uncertaintyMs: Number.isFinite(stats.uncertaintyMs) ? stats.uncertaintyMs : null
     });

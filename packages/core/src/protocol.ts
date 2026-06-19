@@ -18,8 +18,28 @@ export interface RoomMember {
   adapter: AdapterKind;
   joinedAtServerMs: number;
   lastSeenServerMs: number;
+  calibrationMs: number;
   syncQuality: SyncQuality;
   uncertaintyMs: number | null;
+  playerState: PlayerState | null;
+  playerStateAtServerMs: number | null;
+  lastDriftReport: RoomMemberDriftReport | null;
+}
+
+export type DriftCorrectionAction = "none" | "seek" | "play_track" | "resume_track" | "throttled" | "failed";
+
+export interface RoomMemberDriftReport {
+  commandId: string;
+  expectedTrackUri: string;
+  actualTrackUri: string | null;
+  isPlaying: boolean;
+  driftMs: number;
+  expectedPositionMs: number;
+  observedPositionMs: number;
+  uncertaintyMs: number;
+  correction: "none" | "warn" | "hard";
+  correctionAction: DriftCorrectionAction;
+  reportedAtServerMs: number;
 }
 
 export interface ClockSamplePayload {
@@ -58,6 +78,7 @@ export type ClientMessage =
   | {
       type: "member_state";
       state: PlayerState;
+      calibrationMs: number;
       syncQuality: SyncQuality;
       uncertaintyMs: number | null;
     }
@@ -93,10 +114,15 @@ export type ClientMessage =
   | {
       type: "drift_report";
       commandId: string;
+      expectedTrackUri: string;
+      actualTrackUri: string | null;
+      isPlaying: boolean;
       driftMs: number;
       expectedPositionMs: number;
       observedPositionMs: number;
       uncertaintyMs: number;
+      correction: "none" | "warn" | "hard";
+      correctionAction: DriftCorrectionAction;
     };
 
 export type ServerMessage =
