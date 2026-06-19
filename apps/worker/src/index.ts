@@ -44,7 +44,7 @@ export default {
       return json({
         ok: true,
         name: "spotify-party-sync",
-        version: "0.1.10",
+        version: "0.1.11",
         serverNowMs: Date.now()
       });
     }

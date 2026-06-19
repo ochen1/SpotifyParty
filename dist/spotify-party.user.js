@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SpotifyParty
 // @namespace    https://github.com/local/spotify-party
-// @version      0.1.10
+// @version      0.1.11
 // @description  Sync Spotify web playback with SpotifyParty rooms.
 // @match        https://open.spotify.com/*
 // @homepageURL  https://github.com/ochen1/SpotifyParty
@@ -1209,6 +1209,8 @@
   // clients/tampermonkey/src/index.ts
   var INTERNAL_TOKEN_WAIT_MS = 5e3;
   var INTERNAL_TOKEN_POLL_MS = 250;
+  var INTERNAL_PLAY_VERIFY_MS = 900;
+  var INTERNAL_PLAY_VERIFY_POLL_MS = 150;
   var SPOTIFY_RATE_LIMIT_BACKOFF_MS = 6e4;
   var SPOTIFY_PARTY_FEATURE = "spotify_party";
   var capturedToken = null;
@@ -1272,13 +1274,7 @@
         if (await playUriWithInternalPlayer(uri, positionMs)) {
           return;
         }
-        await spotifyFetch("https://api.spotify.com/v1/me/player/play", {
-          method: "PUT",
-          body: JSON.stringify({
-            uris: [uri],
-            position_ms: Math.max(0, Math.round(positionMs))
-          })
-        });
+        await playUriWithSpotifyWebApi(uri, positionMs);
       },
       async seek(positionMs) {
         if (await seekWithInternalPlayer(positionMs)) {
@@ -1604,25 +1600,71 @@
       return false;
     }
     try {
+      const targetPositionMs = Math.max(0, Math.round(positionMs));
+      const origin = createInternalCommandOrigin(player);
+      const currentState = readInternalPlayerState();
+      if (currentState?.uri && currentState.uri !== uri && typeof player.pause === "function") {
+        await Promise.resolve(player.pause(origin)).catch(() => {
+        });
+        await sleep(40);
+      }
       await Promise.resolve(
         player.play(
           { uri },
-          createInternalCommandOrigin(player),
-          { paused: false, seekTo: Math.max(0, Math.round(positionMs)) }
+          origin,
+          {
+            alwaysPlaySomething: true,
+            paused: false,
+            seekTo: targetPositionMs,
+            skipTo: { uri }
+          }
         )
       );
-      await sleep(80);
+      await sleep(100);
       if (typeof player.seekTo === "function") {
-        await Promise.resolve(player.seekTo(Math.max(0, Math.round(positionMs))));
+        await Promise.resolve(player.seekTo(targetPositionMs));
       }
       if (typeof player.resume === "function") {
-        await Promise.resolve(player.resume(createInternalCommandOrigin(player)));
+        await Promise.resolve(player.resume(origin));
+      }
+      const verification = await verifyInternalTrack(uri, INTERNAL_PLAY_VERIFY_MS);
+      if (verification === "mismatched") {
+        console.warn("[SpotifyParty] Internal Spotify play command did not stick; falling back to explicit Web API play.");
+        return false;
       }
       return true;
     } catch {
       spotifyPlayerApi = null;
       return false;
     }
+  }
+  async function playUriWithSpotifyWebApi(uri, positionMs) {
+    const targetPositionMs = Math.max(0, Math.round(positionMs));
+    await spotifyFetch("https://api.spotify.com/v1/me/player/play", {
+      method: "PUT",
+      body: JSON.stringify({
+        uris: [uri],
+        position_ms: targetPositionMs
+      })
+    });
+    await sleep(120);
+    await seekWithInternalPlayer(targetPositionMs).catch(() => false);
+    await resumeWithInternalPlayer().catch(() => false);
+  }
+  async function verifyInternalTrack(uri, timeoutMs) {
+    const expiresAt = Date.now() + timeoutMs;
+    let sawDifferentTrack = false;
+    while (Date.now() <= expiresAt) {
+      const state = readInternalPlayerState();
+      if (state?.uri === uri) {
+        return "matched";
+      }
+      if (state?.uri) {
+        sawDifferentTrack = true;
+      }
+      await sleep(INTERNAL_PLAY_VERIFY_POLL_MS);
+    }
+    return sawDifferentTrack ? "mismatched" : "unknown";
   }
   async function seekWithInternalPlayer(positionMs) {
     const player = getSpotifyPlayerApi();
