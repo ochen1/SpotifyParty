@@ -1,0 +1,23 @@
+{
+  "name": "spotify-party",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Lean Spotify multi-speaker playback synchronization prototype for Spicetify and Tampermonkey.",
+  "scripts": {
+    "build": "npm run typecheck && npm run build:clients && npm run build:worker",
+    "build:clients": "node scripts/build-clients.mjs",
+    "build:worker": "wrangler deploy --dry-run --outdir .wrangler/dry-run",
+    "dev:worker": "wrangler dev",
+    "deploy:worker": "wrangler deploy",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20260618.0",
+    "esbuild": "^0.25.5",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.20.3"
+  }
+}

@@ -1,0 +1,11 @@
+name = "spotify-party-sync"
+main = "apps/worker/src/index.ts"
+compatibility_date = "2026-06-19"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "RoomDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RoomDurableObject"]
