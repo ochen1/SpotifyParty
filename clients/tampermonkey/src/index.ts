@@ -22,6 +22,15 @@ interface SpotifyPlayerResponse {
   };
 }
 
+interface CapturedPlaybackState {
+  uri: string | null;
+  progressMs: number;
+  durationMs: number;
+  isPlaying: boolean;
+  volume: number | null;
+  capturedAtMs: number;
+}
+
 type SpotifyWebpackRequire = {
   (id: number | string): Record<string, unknown>;
   m?: Record<string, unknown>;
@@ -40,6 +49,7 @@ let tokenExpiresAtMs = 0;
 let legacyTokenRetryAfterMs = 0;
 let apiRetryAfterMs = 0;
 let spotifyRequire: SpotifyWebpackRequire | null = null;
+let capturedPlaybackState: CapturedPlaybackState | null = null;
 
 installTokenBridge();
 void boot();
@@ -79,8 +89,20 @@ function createWebAdapter(): SpotifyPartyAdapter {
   }
 
   async function getState(): Promise<PlayerState> {
+    const capturedState = readCapturedPlaybackState();
+
+    if (capturedState?.uri) {
+      return capturedState;
+    }
+
+    const localState = readFallbackState();
+
+    if (localState.uri) {
+      return localState;
+    }
+
     if (Date.now() < apiRetryAfterMs) {
-      return readFallbackState();
+      return localState;
     }
 
     const response = await spotifyFetch<SpotifyPlayerResponse>("https://api.spotify.com/v1/me/player").catch(
@@ -88,7 +110,7 @@ function createWebAdapter(): SpotifyPartyAdapter {
     );
 
     if (!response) {
-      return readFallbackState();
+      return localState;
     }
 
     return {
@@ -329,28 +351,139 @@ function isTokenStoreClass(value: unknown): value is {
   return typeof value === "function" && typeof (value as { getInstance?: unknown }).getInstance === "function";
 }
 
+function readCapturedPlaybackState(): PlayerState | null {
+  if (!capturedPlaybackState?.uri) {
+    return null;
+  }
+
+  const elapsedMs =
+    capturedPlaybackState.isPlaying && Number.isFinite(capturedPlaybackState.capturedAtMs)
+      ? Math.max(0, Date.now() - capturedPlaybackState.capturedAtMs)
+      : 0;
+  const durationMs = Math.max(0, capturedPlaybackState.durationMs || 0);
+  const progressMs = Math.max(
+    0,
+    durationMs > 0
+      ? Math.min(durationMs, capturedPlaybackState.progressMs + elapsedMs)
+      : capturedPlaybackState.progressMs + elapsedMs
+  );
+
+  return {
+    uri: capturedPlaybackState.uri,
+    progressMs,
+    durationMs,
+    isPlaying: capturedPlaybackState.isPlaying,
+    volume: capturedPlaybackState.volume,
+    observedAtMs: monotonicNowMs()
+  };
+}
+
 function readFallbackState(): PlayerState {
   const progressSlider = document.querySelector("[aria-label='Change progress']");
   const volumeSlider = document.querySelector("[aria-label='Change volume']");
-  const url = new URL(location.href);
-  const uriParam = url.searchParams.get("uri");
-  const trackLink = document.querySelector<HTMLAnchorElement>("a[href*='/track/']");
-  const trackIdFromLink = trackLink?.href.match(/\/track\/([A-Za-z0-9]+)/)?.[1] ?? null;
-  const uri =
-    uriParam?.startsWith("spotify:track:")
-      ? uriParam
-      : trackIdFromLink
-        ? `spotify:track:${trackIdFromLink}`
-        : null;
+  const progressFromText = readProgressFromPlayerControls();
+  const progressMs = readSliderNumber(progressSlider, "value") || progressFromText.progressMs;
+  const durationMs = readSliderNumber(progressSlider, "max") || progressFromText.durationMs;
 
   return {
-    uri,
-    progressMs: readSliderNumber(progressSlider, "value"),
-    durationMs: readSliderNumber(progressSlider, "max"),
-    isPlaying: !!document.querySelector("button[aria-label='Pause']"),
-    volume: readSliderNumber(volumeSlider, "value"),
+    uri: readNowPlayingUri(),
+    progressMs,
+    durationMs,
+    isPlaying: isSpotifyPlayingFromPage(),
+    volume: readSliderNumber(volumeSlider, "value") || readStoredVolume(),
     observedAtMs: monotonicNowMs()
   };
+}
+
+function readNowPlayingUri(): string | null {
+  const uriFromUrl = uriFromHref(location.href);
+
+  if (uriFromUrl) {
+    return uriFromUrl;
+  }
+
+  const nowPlayingLinks = [
+    ...document.querySelectorAll<HTMLAnchorElement>(
+      "a[aria-label^='Now playing:'], [aria-label='Now playing bar'] a[href], [aria-label='Now playing view'] a[href]"
+    )
+  ];
+
+  for (const link of nowPlayingLinks) {
+    const uri = uriFromHref(link.href);
+
+    if (uri) {
+      return uri;
+    }
+  }
+
+  const trackLink = document.querySelector<HTMLAnchorElement>(
+    "a[href*='uri=spotify%3Atrack'], a[href*='uri=spotify:track'], a[href*='/track/']"
+  );
+  const uriFromLink = trackLink ? uriFromHref(trackLink.href) : null;
+
+  if (uriFromLink) {
+    return uriFromLink;
+  }
+
+  const trackIdFromLink = trackLink?.href.match(/\/track\/([A-Za-z0-9]+)/)?.[1] ?? null;
+  return trackIdFromLink ? `spotify:track:${trackIdFromLink}` : null;
+}
+
+function uriFromHref(href: string): string | null {
+  try {
+    const url = new URL(href, location.href);
+    const uriParam = url.searchParams.get("uri");
+
+    if (uriParam?.startsWith("spotify:track:")) {
+      return uriParam;
+    }
+
+    const trackId = url.pathname.match(/\/track\/([A-Za-z0-9]+)/)?.[1];
+    return trackId ? `spotify:track:${trackId}` : null;
+  } catch {
+    return null;
+  }
+}
+
+function readProgressFromPlayerControls(): { progressMs: number; durationMs: number } {
+  const controls = document.querySelector("[aria-label='Player controls']");
+  const matches = (controls?.textContent ?? "").match(/\b(?:\d+:)?\d+:\d{2}\b/g) ?? [];
+
+  return {
+    progressMs: timeTextToMs(matches[0]),
+    durationMs: timeTextToMs(matches[1])
+  };
+}
+
+function timeTextToMs(value: string | undefined): number {
+  if (!value) {
+    return 0;
+  }
+
+  const parts = value.split(":").map((part) => Number(part));
+
+  if (parts.some((part) => !Number.isFinite(part))) {
+    return 0;
+  }
+
+  const seconds = parts.reduce((total, part) => total * 60 + part, 0);
+  return seconds * 1000;
+}
+
+function isSpotifyPlayingFromPage(): boolean {
+  return (
+    !!document.querySelector("button[aria-label='Pause']") ||
+    !!document.querySelector("[aria-label='Now playing bar'] button[aria-label^='Pause']")
+  );
+}
+
+function readStoredVolume(): number | null {
+  try {
+    const body = JSON.parse(localStorage.getItem("playback") ?? "{}") as { volume?: unknown };
+    return typeof body.volume === "number" ? body.volume : null;
+  } catch {
+    return null;
+  }
 }
 
 function readSliderNumber(element: Element | null, key: "value" | "max"): number {
@@ -378,13 +511,82 @@ function installTokenBridge(): void {
       tokenExpiresAtMs = Date.now() + 30 * 60_000;
     }
   });
+  window.addEventListener("spotify-party-player-state", (event) => {
+    const state = normalizeCapturedPlaybackState((event as CustomEvent<unknown>).detail);
+
+    if (state) {
+      capturedPlaybackState = state;
+    }
+  });
 
   const page = typeof unsafeWindow === "undefined" ? window : unsafeWindow;
   const script = document.createElement("script");
   script.textContent = `(() => {
+    let lastTrackPlaybackState = null;
     const send = (value) => {
       const match = String(value || "").match(/^Bearer\\s+(.+)$/i);
       if (match) window.dispatchEvent(new CustomEvent("spotify-party-token", { detail: { token: match[1] } }));
+    };
+    const sendPlayerState = (value) => {
+      if (!value || !value.uri) return;
+      lastTrackPlaybackState = value;
+      window.dispatchEvent(new CustomEvent("spotify-party-player-state", { detail: value }));
+    };
+    const isTrackPlaybackStateUrl = (url) => /\\/track-playback\\/v1\\/devices\\/[^/]+\\/state(?:$|[?#])/.test(String(url || ""));
+    const readRequestBody = (body) => {
+      try {
+        if (typeof body === "string") return body;
+        if (body instanceof URLSearchParams) return body.toString();
+      } catch {}
+      return null;
+    };
+    const parseJson = (value) => {
+      try {
+        return typeof value === "string" && value ? JSON.parse(value) : value && typeof value === "object" ? value : null;
+      } catch {
+        return null;
+      }
+    };
+    const parseTrackPlaybackState = (requestBody, responseBody) => {
+      const request = parseJson(requestBody);
+      const response = parseJson(responseBody);
+      const machine = response && response.state_machine;
+      const states = Array.isArray(machine && machine.states) ? machine.states : [];
+      const tracks = Array.isArray(machine && machine.tracks) ? machine.tracks : [];
+      const stateIndex = response && response.updated_state_ref && Number.isInteger(response.updated_state_ref.state_index)
+        ? response.updated_state_ref.state_index
+        : -1;
+      const state =
+        states[stateIndex] ||
+        states.find((candidate) => candidate && request && request.state_ref && candidate.state_id === request.state_ref.state_id);
+      const track = state && Number.isInteger(state.track) ? tracks[state.track] : null;
+      const metadata = track && track.metadata;
+      const uri = metadata && (metadata.uri || metadata.linked_from_uri);
+
+      if (!uri || !String(uri).startsWith("spotify:track:")) {
+        return null;
+      }
+
+      const requestSubState = request && request.sub_state;
+      const responsePaused = response && response.updated_state_ref && response.updated_state_ref.paused;
+      const requestPaused = request && request.state_ref && request.state_ref.paused;
+      return {
+        uri,
+        progressMs: Number(requestSubState && requestSubState.position) || 0,
+        durationMs: Number((requestSubState && requestSubState.duration) || (metadata && metadata.duration)) || 0,
+        isPlaying: !(typeof responsePaused === "boolean" ? responsePaused : !!requestPaused),
+        volume: null,
+        capturedAtMs: Date.now()
+      };
+    };
+    const maybeCaptureTrackPlaybackState = (url, requestBody, response) => {
+      if (!isTrackPlaybackStateUrl(url) || !response) return;
+      try {
+        response.clone().json().then((body) => {
+          const state = parseTrackPlaybackState(requestBody, body);
+          if (state) sendPlayerState(state);
+        }).catch(() => {});
+      } catch {}
     };
     const readHeaders = (headers) => {
       try {
@@ -401,21 +603,67 @@ function installTokenBridge(): void {
     window.fetch = function(input, init) {
       readHeaders(init && init.headers);
       if (input && input.headers) readHeaders(input.headers);
-      return originalFetch.apply(this, arguments);
+      const url = typeof input === "string" ? input : input && input.url;
+      const requestBody = init && readRequestBody(init.body);
+      return originalFetch.apply(this, arguments).then((response) => {
+        maybeCaptureTrackPlaybackState(url, requestBody, response);
+        return response;
+      });
     };
     const open = XMLHttpRequest.prototype.open;
     const setRequestHeader = XMLHttpRequest.prototype.setRequestHeader;
+    const sendRequest = XMLHttpRequest.prototype.send;
     XMLHttpRequest.prototype.open = function() {
       this.__spotifyPartyHeaders = {};
+      this.__spotifyPartyMethod = arguments[0];
+      this.__spotifyPartyUrl = arguments[1];
       return open.apply(this, arguments);
     };
     XMLHttpRequest.prototype.setRequestHeader = function(key, value) {
       if (String(key).toLowerCase() === "authorization") send(value);
       return setRequestHeader.apply(this, arguments);
     };
+    XMLHttpRequest.prototype.send = function(body) {
+      const url = this.__spotifyPartyUrl;
+      const requestBody = readRequestBody(body);
+      if (isTrackPlaybackStateUrl(url)) {
+        this.addEventListener("loadend", () => {
+          try {
+            const state = parseTrackPlaybackState(requestBody, parseJson(this.responseText));
+            if (state) sendPlayerState(state);
+          } catch {}
+        });
+      }
+      return sendRequest.apply(this, arguments);
+    };
   })();`;
   (page.document.documentElement || page.document.head || page.document.body).appendChild(script);
   script.remove();
+}
+
+function normalizeCapturedPlaybackState(value: unknown): CapturedPlaybackState | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const state = value as Partial<CapturedPlaybackState>;
+
+  if (typeof state.uri !== "string" || !state.uri.startsWith("spotify:track:")) {
+    return null;
+  }
+
+  return {
+    uri: state.uri,
+    progressMs: finiteNumber(state.progressMs),
+    durationMs: finiteNumber(state.durationMs),
+    isPlaying: state.isPlaying !== false,
+    volume: typeof state.volume === "number" ? state.volume : null,
+    capturedAtMs: finiteNumber(state.capturedAtMs) || Date.now()
+  };
+}
+
+function finiteNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 async function waitForDocument(): Promise<void> {
